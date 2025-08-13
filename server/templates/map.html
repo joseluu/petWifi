@@ -16,9 +16,16 @@
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
 
+        var points = {{ points | tojson }};
+        // Add markers
         {% for lat, lon in points %}
             L.marker([{{ lat }}, {{ lon }}]).addTo(map);
         {% endfor %}
+
+        // Connect points with a polyline to show trajectory
+        if (points.length > 1) {
+            L.polyline(points, {color: 'blue', weight: 3}).addTo(map);
+        }
     </script>
 </body>
 </html>

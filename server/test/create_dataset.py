@@ -1,11 +1,18 @@
 import requests
 import math
 import json
+import random
 from datetime import datetime
+from dotenv import load_dotenv
+import os
 
-# WiGLE API credentials
+load_dotenv()
+
+# WiGLE API credentials from .env
+WIGLE_USER = os.getenv('WIGLE_USER')
+WIGLE_TOKEN = os.getenv('WIGLE_TOKEN')
 WIGLE_API_URL = 'https://api.wigle.net/api/v2/network/search'
-WIGLE_AUTH = ('', '')
+WIGLE_AUTH = (WIGLE_USER, WIGLE_TOKEN)
 
 # Center coordinates and radius
 CENTER_LAT = 48.72868
@@ -37,7 +44,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 def query_wigle():
-    """Query WiGLE API for APs within the bounding box."""
+    """Query WiGLE API for APs within the bounding box, with pagination."""
     params = {
         'latrange1': LAT_MIN,
         'latrange2': LAT_MAX,
@@ -45,19 +52,32 @@ def query_wigle():
         'longrange2': LON_MAX,
         'onlymine': 'false',
         'freenet': 'false',
-        'paynet': 'false'
+        'paynet': 'false',
+        'resultsPerPage': '100'
     }
-    try:
-        response = requests.get(WIGLE_API_URL, params=params, auth=WIGLE_AUTH)
-        response.raise_for_status()
-        data = response.json()
-        if not data.get('success'):
-            print(f"WiGLE API error: {data.get('message', 'Unknown error')}")
-            return []
-        return data.get('results', [])
-    except requests.RequestException as e:
-        print(f"WiGLE API request failed: {e}")
-        return []
+    all_results = []
+    search_after = None
+    while True:
+        if search_after:
+            params['searchAfter'] = search_after
+        try:
+            response = requests.get(WIGLE_API_URL, params=params, auth=WIGLE_AUTH)
+            response.raise_for_status()
+            data = response.json()
+            if not data.get('success'):
+                print(f"WiGLE API error: {data.get('message', 'Unknown error')}")
+                break
+            results = data.get('results', [])
+            if not results:
+                break
+            all_results.extend(results)
+            search_after = data.get('searchAfter')
+            if not search_after:
+                break
+        except requests.RequestException as e:
+            print(f"WiGLE API request failed: {e}")
+            break
+    return all_results
 
 def generate_test_dataset():
     """Generate 5 test data points with APs within 250m radius."""
@@ -78,19 +98,19 @@ def generate_test_dataset():
         if distance <= RADIUS_M:
             valid_aps.append({'bssid': bssid, 'lat': lat, 'lon': lon})
 
-    if len(valid_aps) < 3:
-        print(f"Only {len(valid_aps)} valid APs found, need at least 3.")
+    if len(valid_aps) < 5:
+        print(f"Only {len(valid_aps)} valid APs found, need at least 5.")
         return []
 
-    # Generate 5 scan points
+    # Generate 5 scan points, each with 5 random APs
     dataset = []
     for scan_id in range(1, 6):
-        # Select 3 random APs (to match your data format)
-        selected_aps = valid_aps[:3] if len(valid_aps) >= 3 else valid_aps
-        # Synthesize RSSI values (realistic range: -30 to -90 dBm)
+        # Select 5 random APs
+        selected_aps = random.sample(valid_aps, 5)
+        # Synthesize RSSI values (realistic range: -50 to -90 dBm, random)
         aps = [
-            {'bssid': ap['bssid'], 'rssi': -60 - (i * 5 + scan_id * 2) % 30}
-            for i, ap in enumerate(selected_aps)
+            {'bssid': ap['bssid'], 'rssi': random.randint(-90, -50)}
+            for ap in selected_aps
         ]
         dataset.append({
             'scan_id': scan_id,

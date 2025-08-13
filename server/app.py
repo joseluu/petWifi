@@ -3,20 +3,25 @@ import datetime
 import math
 import requests
 from requests.auth import HTTPBasicAuth
-import base64  # Optional, but using HTTPBasicAuth instead
 from flask import Flask, request, render_template, jsonify
-import json
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 
-# Wigle API credentials (replace with your own)
-WIGLE_API_NAME = ''  # From wigle.net/account
-WIGLE_API_KEY = ''    # From wigle.net/account
+# WiGLE API credentials from .env
+WIGLE_USER = os.getenv('WIGLE_USER')
+WIGLE_TOKEN = os.getenv('WIGLE_TOKEN')
+WIGLE_API_URL = 'https://api.wigle.net/api/v2/network/search'
 
 # Database setup
 DB_NAME = 'iot_locations.db'
 
 def init_db():
+    """Initialize the SQLite database."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
@@ -39,60 +44,72 @@ def init_db():
     conn.close()
 
 def get_ap_location(bssid):
+    """Query WiGLE API or database for AP location."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('SELECT lat, lon FROM ap_locations WHERE bssid = ?', (bssid.upper(),))
     result = cursor.fetchone()
     if result:
         conn.close()
-        return result
+        return {'lat': result[0], 'lon': result[1], 'error': None}
 
-    # Query Wigle API
-    url = 'https://api.wigle.net/api/v2/network/search'
+    # Query WiGLE API
     params = {
         'netid': bssid.upper(),
         'onlymine': 'false',
         'freenet': 'false',
         'paynet': 'false'
     }
-    headers = {
-        'Accept': 'application/json'
-    }
-    response = requests.get(url, params=params, auth=HTTPBasicAuth(WIGLE_API_NAME, WIGLE_API_KEY), headers=headers)
-    
-    if response.status_code == 200:
-        data = response.json()
-        if data.get('success') and data.get('resultCount', 0) > 0:
-            result = data['results'][0]
-            lat = result.get('trilat')
-            lon = result.get('trilong')
-            if lat is not None and lon is not None:
-                cursor.execute('INSERT INTO ap_locations (bssid, lat, lon) VALUES (?, ?, ?)',
-                               (bssid.upper(), lat, lon))
-                conn.commit()
+    headers = {'Accept': 'application/json'}
+    try:
+        response = requests.get(WIGLE_API_URL, params=params, auth=HTTPBasicAuth(WIGLE_USER, WIGLE_TOKEN), headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('success') and data.get('resultCount', 0) > 0:
+                result = data['results'][0]
+                lat = result.get('trilat')
+                lon = result.get('trilong')
+                if lat is not None and lon is not None:
+                    cursor.execute('INSERT INTO ap_locations (bssid, lat, lon) VALUES (?, ?, ?)',
+                                   (bssid.upper(), lat, lon))
+                    conn.commit()
+                    conn.close()
+                    return {'lat': lat, 'lon': lon, 'error': None}
+                else:
+                    conn.close()
+                    return {'lat': None, 'lon': None, 'error': 'WiGLE returned no location data'}
+            else:
                 conn.close()
-                return lat, lon
-
-    conn.close()
-    return None
+                return {'lat': None, 'lon': None, 'error': f"WiGLE API error: {data.get('message', 'Unknown error')}"}
+        else:
+            conn.close()
+            return {'lat': None, 'lon': None, 'error': f"WiGLE HTTP {response.status_code}: {response.text}"}
+    except requests.RequestException as e:
+        conn.close()
+        return {'lat': None, 'lon': None, 'error': f"WiGLE request failed: {str(e)}"}
 
 @app.route('/api/scan', methods=['POST'])
 def receive_scan():
+    """Handle incoming scan data and estimate IoT position."""
     data = request.json
     if not data or 'aps' not in data or 'scan_id' not in data:
-        return jsonify({'error': 'Invalid data'}), 400
+        return jsonify({'error': 'Invalid data format'}), 400
 
     aps_with_loc = []
+    errors = []
     for ap in data['aps']:
         bssid = ap.get('bssid')
         rssi = ap.get('rssi')
         if bssid and rssi:
             loc = get_ap_location(bssid)
-            if loc:
+            if loc['lat'] is not None and loc['lon'] is not None:
                 # Weight based on signal strength (convert dBm to linear scale)
                 weight = 10 ** (rssi / 10.0)
-                aps_with_loc.append((loc[0], loc[1], weight))
+                aps_with_loc.append((loc['lat'], loc['lon'], weight))
+            if loc['error']:
+                errors.append({'bssid': bssid, 'error': loc['error']})
 
+    response = {'status': 'success', 'errors': errors}
     if aps_with_loc:
         sum_w = sum(w for _, _, w in aps_with_loc)
         if sum_w > 0:
@@ -107,13 +124,16 @@ def receive_scan():
             ''', (data['scan_id'], datetime.datetime.now(), est_lat, est_lon))
             conn.commit()
             conn.close()
+        else:
+            response['status'] = 'no valid weights'
+    else:
+        response['status'] = 'no valid APs'
 
-            return jsonify({'status': 'success'}), 200
-
-    return jsonify({'status': 'no valid APs'}), 200
+    return jsonify(response), 200
 
 @app.route('/')
 def map_view():
+    """Render map with IoT positions from the last 24 hours."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     one_day_ago = datetime.datetime.now() - datetime.timedelta(hours=24)
