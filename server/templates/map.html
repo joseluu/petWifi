@@ -17,14 +17,23 @@
         }).addTo(map);
 
         var points = {{ points | tojson }};
-        // Add markers
-        {% for lat, lon in points %}
-            L.marker([{{ lat }}, {{ lon }}]).addTo(map);
-        {% endfor %}
+        // Add markers with timestamp labels (HH:MM:SS)
+        points.forEach(function(point) {
+            var lat = point[0];
+            var lon = point[1];
+            var timestamp = point[2];
+            // Extract HH:MM:SS from timestamp (YYYY-MM-DD HH:MM:SS)
+            var time = timestamp.split(' ')[1];
+            var marker = L.marker([lat, lon]).addTo(map);
+            marker.bindPopup(time);
+        });
 
         // Connect points with a polyline to show trajectory
         if (points.length > 1) {
-            L.polyline(points, {color: 'blue', weight: 3}).addTo(map);
+            var latlngs = points.map(function(point) {
+                return [point[0], point[1]];
+            });
+            L.polyline(latlngs, {color: 'blue', weight: 3}).addTo(map);
         }
     </script>
 </body>

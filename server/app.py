@@ -133,12 +133,12 @@ def receive_scan():
 
 @app.route('/')
 def map_view():
-    """Render map with IoT positions from the last 24 hours."""
+    """Render map with IoT positions from the last 24 hours, including timestamps."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     one_day_ago = datetime.datetime.now() - datetime.timedelta(hours=24)
-    cursor.execute('SELECT est_lat, est_lon FROM scans WHERE timestamp > ? ORDER BY timestamp', (one_day_ago,))
-    points = cursor.fetchall()
+    cursor.execute('SELECT est_lat, est_lon, timestamp FROM scans WHERE timestamp > ? ORDER BY timestamp', (one_day_ago,))
+    points = cursor.fetchall()  # List of (lat, lon, timestamp)
     conn.close()
 
     bounds = [[0, 0], [0, 0]]
