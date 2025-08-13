@@ -17,14 +17,24 @@
         }).addTo(map);
 
         var points = {{ points | tojson }};
-        // Add markers with timestamp labels (HH:MM:SS)
+        // Add circular markers with 5m diameter (2.5m radius)
         points.forEach(function(point) {
             var lat = point[0];
             var lon = point[1];
             var timestamp = point[2];
-            // Extract HH:MM:SS from timestamp (YYYY-MM-DD HH:MM:SS)
-            var time = timestamp.split(' ')[1];
-            var marker = L.marker([lat, lon]).addTo(map);
+            // Extract HH:MM:SS from timestamp and truncate seconds
+            var timeParts = timestamp.split(' ')[1].split(':');
+            var hours = timeParts[0];
+            var minutes = timeParts[1];
+            var seconds = parseInt(timeParts[2]); // Truncate seconds to integer
+            var time = hours + ':' + minutes + ':' + seconds.toString().padStart(2, '0');
+            var marker = L.circleMarker([lat, lon], {
+                radius: 2.5, // 2.5m radius = 5m diameter
+                color: '#3388ff',
+                fillColor: '#3388ff',
+                fillOpacity: 0.5,
+                weight: 1
+            }).addTo(map);
             marker.bindPopup(time);
         });
 
