@@ -53,7 +53,7 @@
 
 // ✅ LoRa Configuration
 #define LORA_FREQUENCY 868.0
-#define LORA_BANDWIDTH 62.5 
+#define LORA_BANDWIDTH 250 
 #define LORA_SPREADING_FACTOR 12  
 #define LORA_CODING_RATE 8
 #define LORA_TX_POWER 22    
@@ -232,7 +232,7 @@ void loop()
   } while(state != RADIOLIB_ERR_NONE);  // if status error, transmit again
 
 //-------------------------------------------------------------------------------------------------
-  Serial.println("******** Transmit done: Waiting for incoming cat response ******** ");
+  Serial.println("*station** Transmit done: Waiting for incoming cat response ******** ");
 
   // start listening for LoRa packets
   digitalWrite(LED_BUILTIN, LOW);
@@ -293,7 +293,7 @@ void loop()
     Serial.print("transmitNumber:\t"); Serial.println(randomNumber, HEX);
     Serial.print("receivedNumber:\t"); Serial.println(verifyNumber, HEX);
     Serial.print("Round trip number Verify\t\t"); Serial.println(verifyResult ? "good" : "bad");
-    Serial.print("Interval:\t"); Serial.print(receivedInterval); Serial.println(" sec");
+    Serial.print("******* now waiting for Interval:\t"); Serial.print(receivedInterval); Serial.println(" sec");
     Serial.println();
 
     display.clearDisplay();

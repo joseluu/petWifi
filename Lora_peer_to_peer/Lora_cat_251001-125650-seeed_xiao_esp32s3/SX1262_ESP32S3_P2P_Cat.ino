@@ -41,11 +41,15 @@
 
 // ✅ LoRa Configuration
 #define LORA_FREQUENCY 868.0
-#define LORA_BANDWIDTH 62.5 
+#define LORA_BANDWIDTH 250 
 #define LORA_SPREADING_FACTOR 12  
 #define LORA_CODING_RATE 8
 #define LORA_TX_POWER 22    
 #define LORA_PREAMBLE_LEN 12
+// bit time = (2^spreadingFactor)/bandwidth 4096/62.5 = 65.6 [ms]   
+// message duration = (preamble + payload + 4.25 )*8*FEC factor*bit time
+// for SF12 BW62.5 CR 8, 11 bytes payload => about 11 544 [ms]
+// idem for SF12 BW250 CR 8 => about 2 914 [ms]
 
 // SSD1306 software I2C library, SCL=D6, SDA=D7, 400kHz
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(U8G2_R0, /*clock=*/ D6, /*data=*/ D7, /*reset=*/ U8X8_PIN_NONE);
@@ -139,7 +143,7 @@ void setup() {
 // ***********************************************************************************************************
 void loop() 
 {
-  Serial.println("******** Waiting for incoming station packet ********");
+  Serial.println("***cat** Waiting for incoming station packet ********");
 
   // start listening for LoRa packets
   digitalWrite(LED_BUILTIN, LOW);
@@ -155,7 +159,7 @@ void loop()
 
   // received status check  
   if (state != RADIOLIB_ERR_NONE) {
-    Serial.print("failed code ");
+    Serial.print("radio.startReceive() failed code ");
     Serial.println(state);
     errorBlink_1(2);                        // error [[ 2 ]]
   } else {
@@ -164,7 +168,7 @@ void loop()
     state = radio.readData(ub.Buff_u8, dataNum);
 
     senderuid = ub.Buff_u32[0];    // Station device UID
-    if (state == RADIOLIB_ERR_NONE & senderuid == STATION_UID) {   // Check Station ID
+    if (state == RADIOLIB_ERR_NONE && senderuid == STATION_UID) {   // Check Station ID
       receivedTime = millis();
       receivedInterval = (receivedTime - timestamp) / 1000;       // [sec]
       timestamp = receivedTime;
@@ -207,11 +211,15 @@ void loop()
     } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
       // packet was received, but is malformed
       Serial.println("******** CRC error ********");
+      goto loop_again;  
     } else {
       // some other error occurred when receiving
-      Serial.print("receive failed, code ");
-      Serial.println(state);
-      errorBlink_1(3);                        // error [[ 3 ]]                  
+      Serial.print("radio.readData() failed, code ");
+      Serial.print(state);
+      Serial.print(" or bad sender UID: ");
+      Serial.println(senderuid);
+      errorBlink_1(3);                        // error [[ 3 ]]    
+      goto loop_again;              
     }
     digitalWrite(LED_BUILTIN, HIGH);
     delay(1000);     
@@ -279,6 +287,7 @@ void loop()
     digitalWrite(LED_BUILTIN, HIGH);
     delay(1000);   
   }
+  loop_again:
 }
 
 //****************************************************************************************
