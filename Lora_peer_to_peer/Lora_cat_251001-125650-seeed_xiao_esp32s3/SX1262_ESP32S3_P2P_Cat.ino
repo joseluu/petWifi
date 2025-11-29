@@ -40,7 +40,7 @@
 #define LORA_ANT_SW 38 // ✅ Antenna Switch (GPIO38)
 
 // ✅ LoRa Configuration
-#define LORA_FREQUENCY 868.0
+#define LORA_FREQUENCY 869.52
 #define LORA_BANDWIDTH 250 
 #define LORA_SPREADING_FACTOR 12  
 #define LORA_CODING_RATE 8
@@ -224,8 +224,6 @@ void loop()
     digitalWrite(LED_BUILTIN, HIGH);
     delay(1000);     
   
-
-  //----------------------------------------------------------------------------------------------
     Serial.println("******** Transmitting response packet ********");
 
     Vbatt = 3.999;  // sample
@@ -278,8 +276,7 @@ void loop()
       // packet was successfully sent
       Serial.println("transmission done!");
       Serial.println();
-    } 
-    else {
+    } else {
       // some other error occurred
       Serial.print("failed, code ");
       Serial.println(state);
@@ -288,6 +285,7 @@ void loop()
     delay(1000);   
   }
   loop_again:
+  delay(100);
 }
 
 //****************************************************************************************

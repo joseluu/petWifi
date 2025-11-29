@@ -52,7 +52,7 @@
 #define LORA_ANT_SW 38 // ✅ Antenna Switch (GPIO38)
 
 // ✅ LoRa Configuration
-#define LORA_FREQUENCY 868.0
+#define LORA_FREQUENCY 869.52
 #define LORA_BANDWIDTH 250 
 #define LORA_SPREADING_FACTOR 12  
 #define LORA_CODING_RATE 8
@@ -281,9 +281,6 @@ void loop()
       verifyResult = 0;
     }
 
-
-
-
     Serial.print("Received senderuid UID:\t"); Serial.println(senderuid, HEX);
     Serial.print("local RSSI:\t\t"); Serial.print(radio.getRSSI()); Serial.println(" dBm");
     Serial.print("local SNR:\t\t"); Serial.print(radio.getSNR()); Serial.println(" dB");
@@ -293,8 +290,8 @@ void loop()
     Serial.print("transmitNumber:\t"); Serial.println(randomNumber, HEX);
     Serial.print("receivedNumber:\t"); Serial.println(verifyNumber, HEX);
     Serial.print("Round trip number Verify\t\t"); Serial.println(verifyResult ? "good" : "bad");
-    Serial.print("******* now waiting for Interval:\t"); Serial.print(receivedInterval); Serial.println(" sec");
-    Serial.println();
+    Serial.print("receivedInterval\t\t"); Serial.println(receivedInterval);
+
 
     display.clearDisplay();
     display.setCursor(64, 15); display.print("Received");  
@@ -315,7 +312,9 @@ void loop()
   }  
   digitalWrite(LED_BUILTIN, HIGH);
 
+  Serial.print("******** now waiting for Interval:\t"); Serial.print(TX_INTERVAL); Serial.println(" sec");
   // wait for transmit interval
+  delay(TX_INTERVAL - (millis() - txtime));
   while((millis() - txtime) < TX_INTERVAL);
 }
 
