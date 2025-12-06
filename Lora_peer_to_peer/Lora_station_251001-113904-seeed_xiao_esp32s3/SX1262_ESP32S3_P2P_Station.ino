@@ -20,8 +20,10 @@
 
 #include "clib/u8g2.h"          // for charge pump setting: try to fix luminosity problem
 
-#define CHECK_INTERVAL 5000    // communication check interval [mS]
-#define TX_INTERVAL     10000   // depend on the erea rules, total of 360 sec or less per hour
+#include "packet.h"
+
+#define CHECK_INTERVAL 10000    // communication check interval [mS]
+#define TX_INTERVAL     30000   // depend on the erea rules, total of 360 sec or less per hour
 
 #define RF_SW          D5       // RF Switch
 #define sd_sck         D8       // Arduino SPI library uses VSPI circuit
@@ -53,11 +55,11 @@
 
 // ✅ LoRa Configuration
 #define LORA_FREQUENCY 869.52
-#define LORA_BANDWIDTH 250 
-#define LORA_SPREADING_FACTOR 12  
+#define LORA_BANDWIDTH 62.5
+#define LORA_SPREADING_FACTOR 12
 #define LORA_CODING_RATE 8
 #define LORA_TX_POWER 22    
-#define LORA_PREAMBLE_LEN 12
+#define LORA_PREAMBLE_LEN 48
 
 // SSD1306 software I2C library, SCL=D6, SDA=D7, 400kHz
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(U8G2_R0, /*clock=*/ D6, /*data=*/ D7, /*reset=*/ U8X8_PIN_NONE);
@@ -65,16 +67,6 @@ U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(U8G2_R0, /*clock=*/ D6, /*data=*/ D7
 File logFile;
 // Radio lib Modele default setting : SPI:2MHz, MSBFIRST, MODE0
 SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
-
-#define dataNum   11                // receive data 11 bytes  (stationUID 4, randomNumber 4, Vbatt 2, (previous)veryfiResult 1)
-                                    // transmit data 11 bytes (catUID 4, verifyNumber 4, rssi 1, snr 1, interval 1)
-union unionBuff {                   // buffer for data type conversion
-  uint32_t  Buff_u32[dataNum/4];    // stationUID, catUID, randomNumber, verifyNumber
-  uint16_t  Buff_u16[dataNum/2];    // Vbatt
-  int8_t    Buff_i8[dataNum];       // rssi, snr
-  uint8_t   Buff_u8[dataNum];       // verifyResult, interval
-};
-union unionBuff ub;
 
 int8_t rssi;                        // signal RSSI [dBm]
 int8_t snr;                         // signal SN ratio [dB]
@@ -95,6 +87,55 @@ int state;                          // state of radio module
 uint32_t timeoutCheck;              // for timeout check
 uint32_t txtime;                    // transmission time [mS]
 
+// ***** utility functions *****
+// Blinks specified number of times on error
+void errorBlink(uint8_t err)
+{  
+  while(true) { // forever block
+    for(int i = 0; i < err; i++) {
+      digitalWrite(LED_BUILTIN, LOW);
+      delay(200);
+      digitalWrite(LED_BUILTIN, HIGH);
+      delay(200);
+    }
+  delay(1000);
+  }
+}
+
+void errorBlink_1(uint8_t err)
+{
+  for(int i = 0; i < err; i++) {
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(200);
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(200);
+  }
+  delay(500);
+}
+// Print contents of a received CatPacket to Serial
+void printCatPacket(const CatPacket &packet) {
+  Serial.printf("received UID:\t%08X\n", packet.fields.UID);
+  Serial.printf("Packet Number:\t%u\n", packet.fields.packetNumber);
+  Serial.printf("Vbatt:\t\t%u mV\n", packet.fields.vbatt);
+  Serial.printf("RSSI:\t\t%d dBm\n", packet.fields.rssi);
+  Serial.printf("SNR:\t\t%d dB\n", packet.fields.snr);
+  Serial.printf("Interval:\t%u s\n", packet.fields.interval);
+  Serial.printf("AP Count:\t%u\n", packet.fields.apCount);
+
+  for (uint8_t i = 0; i < packet.fields.apCount && i < MAX_APS_IN_PACKET; ++i) {
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             packet.fields.apList[i].bssid[0], packet.fields.apList[i].bssid[1],
+             packet.fields.apList[i].bssid[2], packet.fields.apList[i].bssid[3],
+             packet.fields.apList[i].bssid[4], packet.fields.apList[i].bssid[5]);
+
+    Serial.printf("AP %u: %s  RSSI: %d dBm  Ch: %u\n",
+                  i, mac, packet.fields.apList[i].rssi, packet.fields.apList[i].channel);
+  }
+  Serial.println();
+}
+
+//
 // *******************************************************************************************************
 void setup() {
   Serial.begin(115200);
@@ -184,27 +225,29 @@ void setup() {
 
 
 // ***********************************************************************************************************
+StationPacket stationPacket;
+CatPacket catPacket;
 void loop() 
 {
+  uint32_t processTime;
+  uint32_t delayTime;
   do {  
     Serial.println("******** Station transmitting query packet ********");
       
     Vbatt = 3999; // sample
 
     // transmit data setting
-    ub.Buff_u32[0] = STATION_UID;                      // station device UID
-    randomNumber = random(0x7FFFFFFF);              // for verification
-    ub.Buff_u32[1] = randomNumber;
-    ub.Buff_u16[4] = Vbatt;                         // battery voltage [mV]
-    ub.Buff_u8[10] = verifyResult;                  // previous verify result
+    stationPacket.fields.waitTime = TX_INTERVAL/1000 -22;  // forced inactivity time for cat transmitter before listening again [sec]
+
 
     // transmit a packet
     txtime = millis(); 
     uint16_t sec = txtime / 1000;                   // transmission time [sec] 
 
+    stationPacket.incrementPacketNumber();
     digitalWrite(LED_BUILTIN, LOW);
         operationDone = false;
-        state = radio.startTransmit(ub.Buff_u8, dataNum);
+        state = radio.startTransmit(stationPacket.bytes, sizeof(stationPacket.bytes));
 
         // wait for transmittion completion
         timeoutCheck = millis();
@@ -215,16 +258,16 @@ void loop()
    
     // print and display transmitted data
     txdata = "";
-    for(int i = 0; i < dataNum; i++) {
-      sprintf(printBuff, "%02x", ub.Buff_u8[i]);
+    for(int i = 0; i < sizeof(stationPacket.bytes); i++) {
+      sprintf(printBuff, "%02x", stationPacket.bytes[i]);
       txdata += printBuff;
     }
     txdata.toUpperCase();
     Serial.println(txdata);
 
-    Serial.print("Transmit Station UID:\t"); Serial.println(STATION_UID, HEX);  
-    Serial.print("Time:\t\t"); Serial.print(sec); Serial.println(" sec");
-    Serial.print("randomNumber:\t"); Serial.println(randomNumber, HEX);
+    Serial.print("Transmit Station UID:\t"); Serial.println(stationPacket.fields.UID, HEX);  
+    Serial.print("Transmit packet number:\t"); Serial.println(stationPacket.fields.packetNumber);  
+    Serial.print("Forced inactivity Time:\t\t"); Serial.print(stationPacket.fields.waitTime); Serial.println(" sec");
     Serial.println();
 
     display.setCursor(0, 15); display.print(" Tr");    
@@ -255,24 +298,24 @@ void loop()
   }
 
   // read a received packet 
-  state = radio.readData(ub.Buff_u8, dataNum);
+  state = radio.readData(catPacket.bytes, sizeof(catPacket.bytes));
 
-  // read status and Master UID check
-  senderuid = ub.Buff_u32[0];
-  if (state == RADIOLIB_ERR_NONE && senderuid == CAT_UID) {   // chack status and Master UID
+  // read status and Station UID check
+  senderuid = catPacket.fields.UID;
+  if (state == RADIOLIB_ERR_NONE && senderuid == STATION_UID) {   // check status and Station UID
     rxdata = "";
-    for(int i = 0; i < dataNum; i++) {
-      sprintf(printBuff, "%02x", ub.Buff_u8[i]);
+    for(int i = 0; i < sizeof(catPacket.bytes); i++) {
+      sprintf(printBuff, "%02x", catPacket.bytes[i]);
       rxdata += printBuff;
     }
     rxdata.toUpperCase();
     Serial.println(rxdata);
 
     // restoration of received data
-    verifyNumber = ub.Buff_u32[1];
-    rssi = ub.Buff_i8[8];  // RSSI   min. -127[dBm]
-    snr = ub.Buff_i8[9];   // SNR
-    receivedInterval = ub.Buff_u8[10];
+    rssi = catPacket.fields.rssi;  // RSSI   min. -127[dBm]
+    snr = catPacket.fields.snr;   // SNR
+    Vbatt = catPacket.fields.vbatt; // battery voltage [mV]
+    int bssidCount = catPacket.fields.apCount; // number of APs in packet
 
     // random number verification
     if(randomNumber == verifyNumber) {
@@ -281,17 +324,10 @@ void loop()
       verifyResult = 0;
     }
 
-    Serial.print("Received senderuid UID:\t"); Serial.println(senderuid, HEX);
     Serial.print("local RSSI:\t\t"); Serial.print(radio.getRSSI()); Serial.println(" dBm");
     Serial.print("local SNR:\t\t"); Serial.print(radio.getSNR()); Serial.println(" dB");
-    Serial.print("packet RSSI:\t\t"); Serial.print(rssi); Serial.println(" dBm");
-    Serial.print("packet SNR:\t\t"); Serial.print(snr); Serial.println(" dB");
-    Serial.print("Vbatt:\t\t"); Serial.print(Vbatt); Serial.println(" mV");
-    Serial.print("transmitNumber:\t"); Serial.println(randomNumber, HEX);
-    Serial.print("receivedNumber:\t"); Serial.println(verifyNumber, HEX);
-    Serial.print("Round trip number Verify\t\t"); Serial.println(verifyResult ? "good" : "bad");
-    Serial.print("receivedInterval\t\t"); Serial.println(receivedInterval);
 
+    printCatPacket(catPacket);
 
     display.clearDisplay();
     display.setCursor(64, 15); display.print("Received");  
@@ -311,11 +347,12 @@ void loop()
     errorBlink_1(3);                        // error [[ 3 ]]
   }  
   digitalWrite(LED_BUILTIN, HIGH);
-
-  Serial.print("******** now waiting for Interval:\t"); Serial.print(TX_INTERVAL); Serial.println(" sec");
+  processTime = millis() - txtime;
+  Serial.print("Processing time [ms]: "); Serial.println(processTime);
+  delayTime = TX_INTERVAL - (millis() - txtime);
+  Serial.print("******** now waiting for next transmit in :\t"); Serial.print((delayTime)/1000); Serial.println(" sec");
   // wait for transmit interval
-  delay(TX_INTERVAL - (millis() - txtime));
-  while((millis() - txtime) < TX_INTERVAL);
+  delay(delayTime);
 }
 
 
@@ -328,27 +365,4 @@ void setFlag(void) {
 
 
 //*********************************************************************************
-// Blinks specified number of times on error
-void errorBlink(uint8_t err)
-{
-  while(true) {
-    for(int i = 0; i < err; i++) {
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(200);
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(200);
-    }
-  delay(500);
-  }
-}
 
-void errorBlink_1(uint8_t err)
-{
-  for(int i = 0; i < err; i++) {
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(200);
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(200);
-  }
-  delay(500);
-}

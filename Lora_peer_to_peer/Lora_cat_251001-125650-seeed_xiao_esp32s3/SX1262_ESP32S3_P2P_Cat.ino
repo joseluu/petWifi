@@ -12,14 +12,33 @@
 // 2025/04/04
 
 #include <RadioLib.h>           // RadioLib by Jan Gromes 7.1.2
-#include <U8g2lib.h>            // U8g2 2.35.30
+#include <Arduino.h>
+#include "esp_idf_version.h"
+#include "esp_wifi.h"
+#include "esp_wifi_types.h"
 
-#define CHECK_INTERVAL  5000   // communication check interval [mS]
+#ifndef ESP_IDF_VERSION_VAL
+#define ESP_IDF_VERSION_VAL(major, minor, patch)  ((major)*1000 + (minor)*100 + (patch))
+#endif
+#ifndef ESP_IDF_VERSION
+#define ESP_IDF_VERSION  ESP_IDF_VERSION_VAL(ESP_IDF_VERSION_MAJOR, \
+                                             ESP_IDF_VERSION_MINOR, \
+                                             ESP_IDF_VERSION_PATCH)
+#endif
+#if defined(ESP_IDF_VERSION) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
+    // You are on ESP-IDF v5.5 or newer
+    #define USING_ESP_IDF_V5_5_OR_LATER
+#endif
+                                        
+static uint16_t ap_count = 0;
+#define MAX_AP_RECORDS 10
+wifi_ap_record_t ap_records[MAX_AP_RECORDS];
+
+
+#include "../Lora_station_251001-113904-seeed_xiao_esp32s3/include/packet.h"
+
+#define CHECK_INTERVAL  10000   // communication check interval [mS]
 #define RF_SW           D5      // RF Switch
-
-// Device Unique ID
-#define STATION_UID   0xFE55C37C  // Slave device UID example
-#define CAT_UID  0x54705810  // Master device UID example
 
 #define ESP32_S3_MOSI_PIN 9
 #define ESP32_S3_MISO_PIN 8
@@ -41,18 +60,16 @@
 
 // ✅ LoRa Configuration
 #define LORA_FREQUENCY 869.52
-#define LORA_BANDWIDTH 250 
+#define LORA_BANDWIDTH 62.5
 #define LORA_SPREADING_FACTOR 12  
 #define LORA_CODING_RATE 8
 #define LORA_TX_POWER 22    
-#define LORA_PREAMBLE_LEN 12
+#define LORA_PREAMBLE_LEN 48
 // bit time = (2^spreadingFactor)/bandwidth 4096/62.5 = 65.6 [ms]   
 // message duration = (preamble + payload + 4.25 )*8*FEC factor*bit time
 // for SF12 BW62.5 CR 8, 11 bytes payload => about 11 544 [ms]
 // idem for SF12 BW250 CR 8 => about 2 914 [ms]
 
-// SSD1306 software I2C library, SCL=D6, SDA=D7, 400kHz
-U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(U8G2_R0, /*clock=*/ D6, /*data=*/ D7, /*reset=*/ U8X8_PIN_NONE);
 // Radio lib Modele default setting : SPI:2MHz, MSBFIRST, MODE0
 SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 
@@ -74,7 +91,7 @@ char printBuff[4];                  // for sprintf()
 String  txdata = "";                // transmission data packet string
 String  rxdata = "";                // received data packet string
 bool operationDone = false;         // receive or transmit operation done
-uint8_t receivedInterval;           // Station received interval [sec]
+uint16_t receivedInterval;           // Station received interval [sec]
 uint32_t randomNumber;              // random number to verify that data was sent correctly
 uint32_t verifyNumber;              // verify number from Station
 uint32_t verifyResult = 0;          // verify result 1:GOOD or 0:ERROR
@@ -97,17 +114,6 @@ void setup() {
   digitalWrite(RF_SW, HIGH);            // internal DIO2 controls Tx/Rx
   digitalWrite(LED_BUILTIN, HIGH);      // LED off  
 
-  // Display initialization
-  display.begin();            			/* end of sequence */
-  display.clearDisplay();
-  display.setFont(u8g2_font_8x13B_tr);
-  display.setCursor(0, 15);
-  display.println("Wio-SX1262");
-  display.setCursor(0, 31);
-  display.println("P2P Slave");
-  display.sendBuffer();
-  delay(1000);
-  display.clearDisplay();  
 
   // Radio initialization, depend on the erea rules
   // int16_t begin(float freq = 434.0, float bw = 125.0, uint8_t sf = 9, uint8_t cr = 7, \
@@ -132,23 +138,159 @@ void setup() {
   // callback function when receive or transmit operation done
   radio.setDio1Action(setFlag);
 
-  // setup end
-  display.setCursor(0, 63);
-  display.print("Setup END");
-  display.sendBuffer();
-  delay(1000);
-  display.clearDisplay();
+    // Initial Wi-Fi setup
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+  ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+  ESP_ERROR_CHECK(esp_wifi_start());
+
+}
+// ***********************************************************************************************************
+// Channel scan logic
+#define CHANNEL_LIST_SIZE 11
+// most common channels first
+static uint8_t channel_list[CHANNEL_LIST_SIZE] = {1, 6, 11, 4, 5, 2, 7, 8, 9, 10, 3};
+
+
+#ifdef USING_ESP_IDF_V5_5_OR_LATER
+// only available in esp-idl 5.5, does not work
+// usage: array_2_channel_bitmap(channel_list, CHANNEL_LIST_SIZE, &config);
+static void array_2_channel_bitmap(const uint8_t channel_list[], const uint8_t channel_list_size, wifi_scan_config_t *scan_config) {
+
+    for(uint8_t i = 0; i < channel_list_size; i++) {
+        uint8_t channel = channel_list[i];
+        scan_config->channel_bitmap.ghz_2_channels |= (1 << channel);
+    }
+}
+
+
+void start_passive_scan_multi_channel() {
+  wifi_scan_config_t config = {};
+  bool blocking = true;
+  config.ssid = nullptr;
+  config.bssid = nullptr;
+  config.channel = 0;           // 0 = all channels or channel_bitmap
+  config.show_hidden = true;    // also detect hidden SSIDs
+  config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
+  array_2_channel_bitmap(channel_list, CHANNEL_LIST_SIZE, &config);
+  Serial.printf("Starting passive scan multi channel");
+
+  ESP_ERROR_CHECK(esp_wifi_scan_start(&config, blocking));
+
+  // Wait for scan to complete
+  if (blocking) {
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
+    if (ap_count > 0) {
+      ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_count, ap_records));
+    }
+  }
+}
+#endif
+
+static void start_passive_scan_single_channel(int channel) {
+  wifi_scan_config_t config = {};
+  bool blocking = true;
+  config.ssid = nullptr;
+  config.bssid = nullptr;
+  config.channel = channel;           // 0 = all channels or channel_bitmap
+  config.show_hidden = true;    // also detect hidden SSIDs
+  config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
+
+  ESP_ERROR_CHECK(esp_wifi_scan_start(&config, blocking));
+}
+
+void start_passive_scan_enumerate_channels() {
+  ap_count = 0;
+  Serial.printf("Starting passive scan on channel ");
+  for (int ch = 1; ch <= CHANNEL_LIST_SIZE; ch++) {
+    Serial.printf("%d ", channel_list[ch - 1]);
+    start_passive_scan_single_channel(channel_list[ch - 1]);
+    // TODO: collect APs after each channel scan
+    if (ap_count < MAX_AP_RECORDS) {
+      uint16_t found;
+      esp_err_t ret = esp_wifi_scan_get_ap_num(&found);
+      if (ret == ESP_OK && found > 0) {
+        uint16_t to_copy = min(found, (uint16_t)(MAX_AP_RECORDS - ap_count));
+        //TODO: sorted by descending order of RSSI, we should take only the first ones
+        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&to_copy, &ap_records[ap_count]));
+        ap_count += to_copy;
+      }
+    }
+    delay(100);  // small delay between channel scans
+  }
+  Serial.printf("\n");
+}
+
+void print_scan_results() {
+  Serial.printf("\nScan complete! Found %d networks:\n", ap_count);
+  Serial.println("BSSID               RSSI  Ch  Encryption      SSID");
+  Serial.println("-------------------------------------------------------------");
+
+  for (uint16_t i = 0; i < ap_count; i++) {
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             ap_records[i].bssid[0], ap_records[i].bssid[1], ap_records[i].bssid[2],
+             ap_records[i].bssid[3], ap_records[i].bssid[4], ap_records[i].bssid[5]);
+
+    const char* auth = "OPEN";
+    switch (ap_records[i].authmode) {
+      case WIFI_AUTH_OPEN:            auth = "OPEN";      break;
+      case WIFI_AUTH_WEP:             auth = "WEP";       break;
+      case WIFI_AUTH_WPA_PSK:         auth = "WPA";       break;
+      case WIFI_AUTH_WPA2_PSK:        auth = "WPA2";      break;
+      case WIFI_AUTH_WPA_WPA2_PSK:    auth = "WPA/WPA2";  break;
+      case WIFI_AUTH_WPA3_PSK:        auth = "WPA3";      break;
+      case WIFI_AUTH_WPA2_WPA3_PSK:   auth = "WPA2+WPA3"; break;
+      default:                        auth = "UNKNOWN";   break;
+    }
+
+    char ssid[33] = {0};
+    strncpy(ssid, (char*)ap_records[i].ssid, 32);
+
+    Serial.printf("%s  %3d  %2d   %-12s  %s\n",
+                  mac, ap_records[i].rssi, ap_records[i].primary, auth, ssid);
+  }
+  Serial.println();
+}
+
+// Sort scan results in-place by RSSI descending (strongest first)
+void sort_scan_results_by_rssi(wifi_ap_record_t records[], uint16_t count) {
+  uint16_t n = min(count, (uint16_t)MAX_AP_RECORDS);
+  if (n < 2) return;
+
+  // Simple selection sort (small arrays -> fine and predictable)
+  for (uint16_t i = 0; i < n - 1; ++i) {
+    uint16_t best = i;
+    for (uint16_t j = i + 1; j < n; ++j) {
+      // higher rssi is better (e.g. -30 > -80)
+      if (records[j].rssi > records[best].rssi) {
+        best = j;
+      }
+    }
+    if (best != i) {
+      wifi_ap_record_t tmp = records[i];
+      records[i] = records[best];
+      records[best] = tmp;
+    }
+  }
 }
 
 // ***********************************************************************************************************
+StationPacket stationPacket;
+CatPacket catPacket;
 void loop() 
 {
+  int txtime;
+  int rxTime;
+  int txDuration;
+  int processTime;
   Serial.println("***cat** Waiting for incoming station packet ********");
-
+  memset(stationPacket.bytes, 0, sizeof(stationPacket.bytes));
   // start listening for LoRa packets
   digitalWrite(LED_BUILTIN, LOW);
       operationDone = false;    
-      state = radio.startReceive();
+      state = radio.startReceiveDutyCycleAuto(LORA_PREAMBLE_LEN, sizeof(stationPacket.bytes));  // duty cycle auto Rx mode 
       // check if the flag is set
       // If not received, proceed to next communication cycle to atempt synchronization recovery
       timeoutCheck = millis();
@@ -165,80 +307,90 @@ void loop()
   } else {
 
     // read a packet 
-    state = radio.readData(ub.Buff_u8, dataNum);
+    state = radio.readData(stationPacket.bytes, sizeof(stationPacket.bytes));
 
-    senderuid = ub.Buff_u32[0];    // Station device UID
-    if (state == RADIOLIB_ERR_NONE && senderuid == STATION_UID) {   // Check Station ID
+    if (state == RADIOLIB_ERR_NONE && 
+        stationPacket.fields.UID == STATION_UID &&
+        stationPacket.fields.packetNumber != 0) {   // Check Station ID
+      rxTime = millis();
+      // successful read
+      rxdata = "";
+      for(int i = 0; i < sizeof(stationPacket.bytes); i++) {
+        sprintf(printBuff, "%02x", stationPacket.bytes[i]);
+        rxdata += printBuff;
+      }
+      Serial.print("Received Data: ");
+      Serial.println(rxdata);
       receivedTime = millis();
       receivedInterval = (receivedTime - timestamp) / 1000;       // [sec]
       timestamp = receivedTime;
 
-      rxdata = "";
-      for(int i = 0; i < dataNum; i++) {
-        sprintf(printBuff, "%02x", ub.Buff_u8[i]);
-        rxdata += printBuff;
-      }
-      rxdata.toUpperCase();
-      Serial.println(rxdata);
 
-      // restoration of received data
-      randomNumber = ub.Buff_u32[1];    // random number to verify
-      Vbatt = ub.Buff_u16[4];           // battery voltage [mV]
-      verifyResult = ub.Buff_u8[10];    // verify result 
-
-      Serial.printf("Sender UID:\t%08x\n", senderuid);    
-      Serial.print("Interval:\t"); Serial.print(receivedInterval); Serial.println(" sec");
-      Serial.print("Vbatt:\t\t"); Serial.print(Vbatt/1000.0); Serial.println(" V");
-      Serial.print("randomNumber:\t"); Serial.println(randomNumber, HEX);
-      Serial.print("Verify:\t\t"); Serial.println(verifyResult ? "good" : "bad");
+      Serial.printf("Sender UID:\t%08x\n", stationPacket.fields.UID);    
+      Serial.print("Packet Number:\t"); Serial.println(stationPacket.fields.packetNumber);
+      Serial.print("Forced inactivity time:\t"); Serial.print(stationPacket.fields.waitTime); Serial.println(" sec");
 
       // RSSI and SNR of the last received packet
       rssi = radio.getRSSI();
-      Serial.print("RSSI:\t\t"); Serial.print(rssi); Serial.println(" dBm");
+      Serial.print("local RSSI:\t\t"); Serial.print(rssi); Serial.println(" dBm");
       snr = radio.getSNR();
-      Serial.print("SNR:\t\t"); Serial.print(snr); Serial.println(" dB");
+      Serial.print("local SNR:\t\t"); Serial.print(snr); Serial.println(" dB");
 
-      display.clearDisplay();
-      display.setCursor(0, 15); display.print("Received"); 
-      display.setCursor(0, 31); display.print(randomNumber, HEX);
-      display.setCursor(80, 31); display.print(verifyResult ? "good" : "bad");    
-      display.setCursor(0, 47); display.print(rssi); display.print(" dBm");
-      display.setCursor(80, 47); display.print(snr); display.print(" dB");
-      display.setCursor(0, 63); display.print(receivedTime / 1000); display.print(" sec");
-      display.setCursor(80, 63); display.print(Vbatt/1000.0); display.print(" V");   
-      display.sendBuffer();
-      
     } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
       // packet was received, but is malformed
       Serial.println("******** CRC error ********");
       goto loop_again;  
+    } else if (state == 0) {
+      Serial.print("radio.readData() unproductive, code 0 packetNumber:");
+      Serial.print(stationPacket.fields.packetNumber);
+      Serial.print(" or bad sender UID: ");
+      Serial.println(stationPacket.fields.UID, HEX);
+      goto loop_again;
     } else {
       // some other error occurred when receiving
       Serial.print("radio.readData() failed, code ");
       Serial.print(state);
       Serial.print(" or bad sender UID: ");
-      Serial.println(senderuid);
+      Serial.println(stationPacket.fields.UID, HEX);
       errorBlink_1(3);                        // error [[ 3 ]]    
       goto loop_again;              
     }
     digitalWrite(LED_BUILTIN, HIGH);
-    delay(1000);     
+
   
+    
+    /******** Scanning channels ********/
+#ifdef USING_ESP_IDF_V5_5_OR_LATER
+      start_passive_scan_multi_channel();
+#else
+      start_passive_scan_enumerate_channels();
+#endif
+    sort_scan_results_by_rssi(ap_records, ap_count);
+    print_scan_results();
+
+    
     Serial.println("******** Transmitting response packet ********");
 
     Vbatt = 3.999;  // sample
 
     // transmit data setting
-    ub.Buff_u32[0] = CAT_UID;         // Cat device UID
-    verifyNumber = randomNumber;
-    ub.Buff_u32[1] = verifyNumber;      // to verify
-    ub.Buff_i8[8] = rssi;               // Cat RSSI  [dBm]
-    ub.Buff_i8[9] = snr;                // Cat SN ratio  [dB]
-    ub.Buff_u8[10] = receivedInterval;  // packet reserved interval [sec]
+    catPacket.fields.UID = stationPacket.fields.UID;         // confirmed Station device UID
+    catPacket.fields.packetNumber = stationPacket.fields.packetNumber; // echo back packet number
+    catPacket.fields.vbatt = Vbatt;                   // battery voltage [mV]
+    catPacket.fields.rssi = rssi;                   // Cat RSSI  [dBm]
+    catPacket.fields.snr = snr;                     // Cat SN ratio  [dB]
 
+    catPacket.fields.apCount = std::min((int)ap_count, MAX_APS_IN_PACKET);
+    // copy AP records to packet
+    for (uint8_t i = 0; i < ap_count && i < MAX_APS_IN_PACKET; i++) {
+      catPacket.fields.apList[i] = AccessPoint(ap_records[i].bssid, ap_records[i].rssi, ap_records[i].primary);
+    }
+
+    // start transmission
+    txtime = millis();
     digitalWrite(LED_BUILTIN, LOW);
         operationDone = false;
-        state = radio.startTransmit(ub.Buff_u8, dataNum);
+        state = radio.startTransmit(catPacket.bytes, sizeof(catPacket.bytes));
 
         // wait for transmittion completion
         timeoutCheck = millis();
@@ -246,30 +398,19 @@ void loop()
           delay(1);
         }
     digitalWrite(LED_BUILTIN, HIGH);
-
-    // print and display transmitted data
+    txDuration = millis() - txtime;
+    processTime = millis() - rxTime;
+    Serial.print("Transmission time [ms]: "); Serial.println(txDuration);
+    Serial.print("Processing time [ms]: "); Serial.println(processTime);
+    // serial print transmitted data
     txdata = "";
-    for(int i = 0; i < dataNum; i++) {
-      sprintf(printBuff, "%02x", ub.Buff_u8[i]);
+    for(int i = 0; i < sizeof(catPacket.bytes); i++) {
+      sprintf(printBuff, "%02x", catPacket.bytes[i]);
       txdata += printBuff;
     }
     txdata.toUpperCase();
     Serial.println(txdata);
 
-    Serial.printf("Cat UID:\t%08x\n", CAT_UID);
-    Serial.print("RSSI\t\t"); Serial.print(rssi); Serial.println(" dBm");
-    Serial.print("SNR\t\t"); Serial.print(snr); Serial.println(" dB");
-    Serial.print("verifyNumber:\t"); Serial.println(verifyNumber, HEX);
-
-    display.clearDisplay();
-    display.setCursor(40, 15); display.print("Transmitted");  
-    display.setCursor(0, 31); display.print(verifyNumber, HEX);
-    display.setCursor(80, 31); display.print(verifyResult ? "good" : "bad");
-    display.setCursor(0, 47); display.print(rssi); display.print(" dBm");
-    display.setCursor(80, 47); display.print(snr); display.print(" dB");
-    display.setCursor(0, 63); display.print(receivedInterval); display.print(" sec");
-    display.setCursor(80, 63); display.print(Vbatt/1000.0); display.print(" V");
-    display.sendBuffer();   
 
     // error status check
     if (state == RADIOLIB_ERR_NONE) {
@@ -281,8 +422,9 @@ void loop()
       Serial.print("failed, code ");
       Serial.println(state);
     }
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(1000);   
+    digitalWrite(LED_BUILTIN, LOW);
+    Serial.printf("entering forced delay for %d sec\n", stationPacket.fields.waitTime);
+    delay(stationPacket.fields.waitTime * 1000);  // forced inactivity time
   }
   loop_again:
   delay(100);
