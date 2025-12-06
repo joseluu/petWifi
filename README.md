@@ -5,3 +5,4 @@ Using lora, the base station interrogates the tracker periodically to get a repo
 The tracker reports the bssids it receives along with the signal strength (rssi) of the stations.
 Geolocation is done on the station side with the bssid as data using the wigle.net database.
 
+Hardware used is XIAO ESP32S3 & Wio-SX1262 Kit from seeed studio, any ESP32 and SX1262 combination should work without modifications.
