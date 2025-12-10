@@ -34,7 +34,9 @@ except ValueError as e:
 MAP_RADIUS = float(os.getenv('MAP_RADIUS', '500'))  # default to 500 meters if not set
 
 # Database and logging setup
-DB_NAME = 'wigle_cache_3e-3.db'
+DB_NAME = os.getenv('DB_FILENAME')
+if not DB_NAME:
+    print("DB_FILENAME not set in .env")
 LOG_FILE = 'wigle_requests.log'
 
 # Configure logging
