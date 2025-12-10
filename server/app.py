@@ -6,19 +6,43 @@ from requests.auth import HTTPBasicAuth
 from flask import Flask, request, render_template, jsonify
 from dotenv import load_dotenv
 import os
+import logging
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 
-# WiGLE API credentials from .env
+# WiGLE API credentials
 WIGLE_USER = os.getenv('WIGLE_USER')
 WIGLE_TOKEN = os.getenv('WIGLE_TOKEN')
 WIGLE_API_URL = 'https://api.wigle.net/api/v2/network/search'
 
-# Database setup
-DB_NAME = 'iot_locations.db'
+# Load center points from .env
+map_center_str = os.getenv('MAP_CENTER')
+if not map_center_str:
+    map_center_str = "48.853480768362225,2.3488040743567162"  # Default to Paris center
+try:
+    # Parse comma-separated lat,lon pairs
+    coords = map_center_str.split(',')
+    if len(coords) != 2:
+        raise ValueError("MAP_CENTER must have exactly two values (lat,lon)")
+    MAP_CENTER_LAT = float(coords[0])
+    MAP_CENTER_LON = float(coords[1])
+except ValueError as e:
+    raise ValueError(f"Invalid MAP_CENTER format in .env: {e}")
+MAP_RADIUS = float(os.getenv('MAP_RADIUS', '500'))  # default to 500 meters if not set
+
+# Database and logging setup
+DB_NAME = 'wigle_cache_3e-3.db'
+LOG_FILE = 'wigle_requests.log'
+
+# Configure logging
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 def init_db():
     """Initialize the SQLite database."""
@@ -44,7 +68,7 @@ def init_db():
     conn.close()
 
 def get_ap_location(bssid):
-    """Query WiGLE API or database for AP location."""
+    """Query local database first, then WiGLE API if BSSID is missing."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('SELECT lat, lon FROM ap_locations WHERE bssid = ?', (bssid.upper(),))
@@ -53,7 +77,7 @@ def get_ap_location(bssid):
         conn.close()
         return {'lat': result[0], 'lon': result[1], 'error': None}
 
-    # Query WiGLE API
+    # BSSID not in local database, query WiGLE API
     params = {
         'netid': bssid.upper(),
         'onlymine': 'false',
@@ -61,8 +85,10 @@ def get_ap_location(bssid):
         'paynet': 'false'
     }
     headers = {'Accept': 'application/json'}
+    logging.info(f"WiGLE API request for BSSID {bssid}: {params}")
     try:
         response = requests.get(WIGLE_API_URL, params=params, auth=HTTPBasicAuth(WIGLE_USER, WIGLE_TOKEN), headers=headers)
+        logging.info(f"WiGLE API response status for BSSID {bssid}: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
             if data.get('success') and data.get('resultCount', 0) > 0:
@@ -80,13 +106,39 @@ def get_ap_location(bssid):
                     return {'lat': None, 'lon': None, 'error': 'WiGLE returned no location data'}
             else:
                 conn.close()
-                return {'lat': None, 'lon': None, 'error': f"WiGLE API error: {data.get('message', 'Unknown error')}"}
+                error_msg = f"WiGLE API error: {data.get('message', 'Unknown error')}"
+                logging.error(error_msg)
+                return {'lat': None, 'lon': None, 'error': error_msg}
         else:
             conn.close()
-            return {'lat': None, 'lon': None, 'error': f"WiGLE HTTP {response.status_code}: {response.text}"}
+            error_msg = f"WiGLE HTTP {response.status_code}: {response.text}"
+            logging.error(error_msg)
+            return {'lat': None, 'lon': None, 'error': error_msg}
     except requests.RequestException as e:
         conn.close()
-        return {'lat': None, 'lon': None, 'error': f"WiGLE request failed: {str(e)}"}
+        error_msg = f"WiGLE request failed: {str(e)}"
+        logging.error(error_msg)
+        return {'lat': None, 'lon': None, 'error': error_msg}
+
+
+@app.route('/api/track', methods=['GET'])
+def track_device():
+    """Track a device's location based on its BSSID."""
+    scan_id = request.args.get('scan_id', type=int)
+    bssids = request.args.getlist('bssid[]')
+    rssis = request.args.getlist('rssi[]')
+    print(f"Received track request: scan_id={scan_id}, bssids={bssids}, rssis={rssis}")
+
+    aps = []
+    for bssid, rssi in zip(bssids, rssis):
+        if not bssid or not rssi:
+            return jsonify({'error': 'Missing bssid or rssi parameters'}), 400
+        aps.append({'bssid': bssid, 'rssi': int(rssi)})
+
+    aps_with_loc = []
+    errors = []
+    return process_aps(scan_id, aps, aps_with_loc, errors)
+
 
 @app.route('/api/scan', methods=['POST'])
 def receive_scan():
@@ -97,7 +149,12 @@ def receive_scan():
 
     aps_with_loc = []
     errors = []
-    for ap in data['aps']:
+    return process_aps(data['scan_id'], data['aps'], aps_with_loc, errors)
+
+
+def process_aps(scan_id, aps, aps_with_loc, errors):
+    print(str(aps))
+    for ap in aps:
         bssid = ap.get('bssid')
         rssi = ap.get('rssi')
         if bssid and rssi:
@@ -121,7 +178,7 @@ def receive_scan():
             cursor.execute('''
                 INSERT INTO scans (scan_id, timestamp, est_lat, est_lon)
                 VALUES (?, ?, ?, ?)
-            ''', (data['scan_id'], datetime.datetime.now(), est_lat, est_lon))
+            ''', (scan_id, datetime.datetime.now(), est_lat, est_lon))
             conn.commit()
             conn.close()
         else:
@@ -131,6 +188,7 @@ def receive_scan():
 
     return jsonify(response), 200
 
+
 @app.route('/')
 def map_view():
     """Render map with IoT positions from the last 24 hours, including timestamps."""
@@ -138,23 +196,27 @@ def map_view():
     cursor = conn.cursor()
     one_day_ago = datetime.datetime.now() - datetime.timedelta(hours=24)
     cursor.execute('SELECT est_lat, est_lon, timestamp FROM scans WHERE timestamp > ? ORDER BY timestamp', (one_day_ago,))
-    points = cursor.fetchall()  # List of (lat, lon, timestamp)
+    points = cursor.fetchall()
     conn.close()
 
     bounds = [[0, 0], [0, 0]]
+    #
     if points:
         avg_lat = sum(p[0] for p in points) / len(points)
         avg_lon = sum(p[1] for p in points) / len(points)
 
-        # Approximate deltas for 250m in each direction (500m square)
-        delta_lat = 250 / 111000.0  # degrees per meter for latitude
-        delta_lon = 250 / (111000.0 * math.cos(math.radians(avg_lat)))  # adjust for longitude
+    else:
+        avg_lat = MAP_CENTER_LAT
+        avg_lon = MAP_CENTER_LON
 
-        bounds = [
-            [avg_lat - delta_lat, avg_lon - delta_lon],
-            [avg_lat + delta_lat, avg_lon + delta_lon]
-        ]
+    # Approximate deltas for 100m in each direction (200m square)
+    delta_lat = MAP_RADIUS / 111000.0  # degrees per meter for latitude
+    delta_lon = MAP_RADIUS / (111000.0 * math.cos(math.radians(avg_lat)))  # adjust for longitude
 
+    bounds = [
+        [avg_lat - delta_lat, avg_lon - delta_lon],
+        [avg_lat + delta_lat, avg_lon + delta_lon]
+    ]
     return render_template('map.html', points=points, bounds=bounds)
 
 if __name__ == '__main__':

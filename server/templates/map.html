@@ -3,13 +3,27 @@
 <head>
     <title>IoT Location Map</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
         #map { height: 600px; }
+        .text-overlay {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(255, 255, 255, 0.8);
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            z-index: 1000;
+        }
     </style>
 </head>
 <body>
     <div id="map"></div>
+    <div class="text-overlay">Last 24 hours</div>
     <script>
         var map = L.map('map').fitBounds({{ bounds | tojson }});
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -17,7 +31,7 @@
         }).addTo(map);
 
         var points = {{ points | tojson }};
-        // Add circular markers with 5m diameter (2.5m radius)
+        // Add circular markers with 20m diameter (10m radius)
         points.forEach(function(point) {
             var lat = point[0];
             var lon = point[1];
@@ -29,7 +43,7 @@
             var seconds = parseInt(timeParts[2]); // Truncate seconds to integer
             var time = hours + ':' + minutes + ':' + seconds.toString().padStart(2, '0');
             var marker = L.circleMarker([lat, lon], {
-                radius: 2.5, // 2.5m radius = 5m diameter
+                radius: 10, // 10m radius = 20m diameter
                 color: '#3388ff',
                 fillColor: '#3388ff',
                 fillOpacity: 0.5,
@@ -44,6 +58,8 @@
                 return [point[0], point[1]];
             });
             L.polyline(latlngs, {color: 'blue', weight: 3}).addTo(map);
+        } else {
+            document.querySelector('.text-overlay').textContent = 'No data points available';
         }
     </script>
 </body>
