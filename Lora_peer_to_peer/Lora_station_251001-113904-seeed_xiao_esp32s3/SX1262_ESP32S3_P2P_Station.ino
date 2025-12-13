@@ -12,18 +12,21 @@
 
 
 // 2025/04/04
-
+#include <WiFi.h>
+#include <HTTPClient.h>         // << added: HTTP client for upload
 #include <RadioLib.h>           // RadioLib by Jan Gromes 7.1.2  
 #include <U8g2lib.h>            // U8g2 2.35.30
 #include <SPI.h>
 #include <SD.h>
+#include <esp_crc.h>            // for CRC32 calculation
 
 #include "clib/u8g2.h"          // for charge pump setting: try to fix luminosity problem
 
 #include "packet.h"
+#include "network_creds.h"      // WiFi SSID and Password
 
-#define CHECK_INTERVAL 10000    // communication check interval [mS]
-#define TX_INTERVAL     30000   // depend on the erea rules, total of 360 sec or less per hour
+#define CHECK_INTERVAL  10000  // communication check interval [mS]
+#define TX_INTERVAL     30000  // depend on the erea rules, total of 360 sec or less per hour
 
 #define RF_SW          D5       // RF Switch
 #define sd_sck         D8       // Arduino SPI library uses VSPI circuit
@@ -80,7 +83,7 @@ String  txdata = "";                // transmission data packet string
 String  rxdata = "";                // received data packet string
 bool operationDone = false;         // receive or transmit operation done
 String logFileName = "/LoRaLog.txt"; // Log file name, need '/'
-
+uint32_t previousCatBssidsCRC32;     // previous received Cat BSSIDs CRC32
 
 uint8_t receivedInterval;           // Station received interval [sec]
 int state;                          // state of radio module
@@ -135,11 +138,84 @@ void printCatPacket(const CatPacket &packet) {
   Serial.println();
 }
 
+char * formatCatPacket(const CatPacket &packet, char *buffer, size_t bufferSize) {
+  int offset = 0;
+  offset += snprintf(buffer + offset, bufferSize - offset, "%s", uploadURL);
+  offset += snprintf(buffer + offset, bufferSize - offset, "?scan_id=%u,", packet.fields.packetNumber);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&cat_vbatt=%u,", packet.fields.vbatt);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&cat_rssi=%d,", packet.fields.rssi);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&cat_snr=%d,", packet.fields.snr);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&ap_rssi=%d,", rssi);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&ap_snr=%d,", snr);
+
+  for (uint8_t i = 0; i < packet.fields.apCount && i < MAX_APS_IN_PACKET; ++i) {
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             packet.fields.apList[i].bssid[0], packet.fields.apList[i].bssid[1],
+             packet.fields.apList[i].bssid[2], packet.fields.apList[i].bssid[3],
+             packet.fields.apList[i].bssid[4], packet.fields.apList[i].bssid[5]);
+
+    offset += snprintf(buffer + offset, bufferSize - offset, "&bssid[]=%s,&rssi[]=%d",
+                       mac, packet.fields.apList[i].rssi);
+  }
+  return buffer;
+}
+
+uint32_t calculateCatBssidsCRC32(const CatPacket &packet) {
+  uint32_t crc = 0;
+    for (uint8_t i = 0; i < packet.fields.apCount && i < MAX_APS_IN_PACKET; ++i) {
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             packet.fields.apList[i].bssid[0], packet.fields.apList[i].bssid[1],
+             packet.fields.apList[i].bssid[2], packet.fields.apList[i].bssid[3],
+             packet.fields.apList[i].bssid[4], packet.fields.apList[i].bssid[5]);
+    crc = esp_crc32_le(crc, &packet.fields.apList[i].bssid[0], 6);
+  }
+  return crc;
+}
+
+bool uploadDataToServer(const char *url) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("uploadDataToServer: WiFi not connected");
+    return false;
+  }
+
+  HTTPClient http;
+  if (!http.begin(url)) {
+    Serial.println("uploadDataToServer: HTTP begin failed");
+    return false;
+  }
+
+  int httpCode = http.GET();
+  if (httpCode <= 0) {
+    Serial.printf("uploadDataToServer: GET failed, err=%d\n", httpCode);
+    http.end();
+    return false;
+  }
+
+  Serial.printf("uploadDataToServer: HTTP code %d\n", httpCode);
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    Serial.println("uploadDataToServer: OK response information:");
+    Serial.println(payload);
+    http.end();
+    return true;
+  } else {
+    // non-OK response (e.g. 3xx/4xx/5xx)
+    Serial.printf("uploadDataToServer: unexpected response %d\n", httpCode);
+    http.end();
+    return false;
+  }
+}
+
+
 //
 // *******************************************************************************************************
 void setup() {
   Serial.begin(115200);
-  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  snprintf(uploadURL, sizeof(uploadURL), "http://%s/api/track", uploadHost);
   // Station UID
   Serial.print("Station UID "); Serial.println(STATION_UID, HEX);
 
@@ -222,6 +298,7 @@ void setup() {
   display.print("-- Receiv0ng --");
   display.sendBuffer();
 }
+
 
 
 // ***********************************************************************************************************
@@ -328,6 +405,18 @@ void loop()
     Serial.print("local SNR:\t\t"); Serial.print(radio.getSNR()); Serial.println(" dB");
 
     printCatPacket(catPacket);
+    uint32_t currentCatBssidsCRC32 = calculateCatBssidsCRC32(catPacket);
+    if (currentCatBssidsCRC32 == previousCatBssidsCRC32){
+      Serial.println("Same Cat BSSIDs, cat did not move.");
+    } else {
+      previousCatBssidsCRC32 = currentCatBssidsCRC32;
+      Serial.println("New Cat BSSIDs received, cat moved.");
+      char * formattedData = formatCatPacket(catPacket, printBuff, sizeof(printBuff));
+      Serial.println("Formatted Data for Upload:");
+      Serial.println(formattedData);
+      // Here you can add code to upload the formatted data to your server
+      uploadDataToServer(formattedData);
+    }
 
     display.clearDisplay();
     display.setCursor(64, 15); display.print("Received");  

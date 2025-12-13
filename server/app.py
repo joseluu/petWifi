@@ -62,6 +62,11 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             scan_id INTEGER,
             timestamp DATETIME,
+            vbat REAL,
+            cat_rssi INTEGER,
+            cat_snr INTEGER,
+            ap_rssi INTEGER,
+            ap_snr INTEGER,
             est_lat REAL,
             est_lon REAL
         )
