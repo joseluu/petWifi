@@ -135,7 +135,12 @@ def track_device():
     scan_id = request.args.get('scan_id', type=int)
     bssids = request.args.getlist('bssid[]')
     rssis = request.args.getlist('rssi[]')
-    print(f"Received track request: scan_id={scan_id}, bssids={bssids}, rssis={rssis}")
+    sta_rssi = request.args.get('sta_rssi', type=int)
+    cat_rssi = request.args.get('cat_rssi', type=int)
+    sta_snr = request.args.get('sta_snr', type=int)
+    cat_snr = request.args.get('cat_snr', type=int)
+    print(f"Track: scan_id={scan_id}, sta_rssi={sta_rssi}, cat_rssi={cat_rssi}, \
+          sta_snr={sta_snr}, cat_snr={cat_snr}, bssid[0]={bssids[0]}, rssi[0]={rssis[0]}")
 
     aps = []
     for bssid, rssi in zip(bssids, rssis):
