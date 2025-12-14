@@ -63,7 +63,7 @@ def init_db():
             scan_id INTEGER,
             timestamp DATETIME,
             est_lat REAL,
-            est_lon REAL
+            est_lon REAL,
             cat_vbatt REAL,
             cat_rssi INTEGER,
             cat_snr INTEGER,
