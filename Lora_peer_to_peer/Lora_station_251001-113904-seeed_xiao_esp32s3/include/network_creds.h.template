@@ -1,0 +1,4 @@
+const char* ssid = "your-ssid";
+const char* password = "your-password";
+const char* uploadHost = "your-host-server-or-ip";
+char uploadURL[100];

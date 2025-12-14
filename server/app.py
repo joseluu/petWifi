@@ -62,13 +62,14 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             scan_id INTEGER,
             timestamp DATETIME,
-            vbat REAL,
-            cat_rssi INTEGER,
-            cat_snr INTEGER,
-            ap_rssi INTEGER,
-            ap_snr INTEGER,
             est_lat REAL,
             est_lon REAL
+            cat_vbatt REAL,
+            cat_rssi INTEGER,
+            cat_snr INTEGER,
+            sta_vbatt REAL,
+            sta_rssi INTEGER,
+            sta_snr INTEGER
         )
     ''')
     conn.commit()
@@ -142,9 +143,17 @@ def track_device():
             return jsonify({'error': 'Missing bssid or rssi parameters'}), 400
         aps.append({'bssid': bssid, 'rssi': int(rssi)})
 
+    common_data = {
+        'sta_vbatt': request.args.get('sta_vbatt', type=float, default=0.0),
+        'sta_rssi': request.args.get('sta_rssi', type=int, default=0),
+        'sta_snr': request.args.get('sta_snr', type=int, default=0),
+        'cat_vbatt': request.args.get('cat_vbatt', type=float, default=0.0),
+        'cat_rssi': request.args.get('cat_rssi', type=int, default=0),
+        'cat_snr': request.args.get('cat_snr', type=int, default=0)
+    }
     aps_with_loc = []
     errors = []
-    return process_aps(scan_id, aps, aps_with_loc, errors)
+    return process_aps(scan_id, aps, aps_with_loc, common_data, errors)
 
 
 @app.route('/api/scan', methods=['POST'])
@@ -156,10 +165,10 @@ def receive_scan():
 
     aps_with_loc = []
     errors = []
-    return process_aps(data['scan_id'], data['aps'], aps_with_loc, errors)
+    return process_aps(data['scan_id'], data['aps'], aps_with_loc, data, errors)
 
 
-def process_aps(scan_id, aps, aps_with_loc, errors):
+def process_aps(scan_id, aps, aps_with_loc, common_data, errors):
     print(str(aps))
     for ap in aps:
         bssid = ap.get('bssid')
@@ -183,9 +192,11 @@ def process_aps(scan_id, aps, aps_with_loc, errors):
             conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO scans (scan_id, timestamp, est_lat, est_lon)
-                VALUES (?, ?, ?, ?)
-            ''', (scan_id, datetime.datetime.now(), est_lat, est_lon))
+                INSERT INTO scans (scan_id, timestamp, est_lat, est_lon, sta_vbatt, sta_rssi, sta_snr, cat_vbatt, cat_rssi, cat_snr)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (scan_id, datetime.datetime.now(), est_lat, est_lon,
+                  common_data['sta_vbatt'], common_data['sta_rssi'], common_data['sta_snr'],
+                  common_data['cat_vbatt'], common_data['cat_rssi'], common_data['cat_snr']))
             conn.commit()
             conn.close()
         else:

@@ -74,11 +74,11 @@ SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 int8_t rssi;                        // signal RSSI [dBm]
 int8_t snr;                         // signal SN ratio [dB]
 uint32_t senderuid;                 // sender device UID
-uint16_t Vbatt;                     // battery voltage data [V]
+uint16_t Vbatt;                     // battery voltage station [V]
 uint32_t randomNumber;              // random number to verify
 uint32_t verifyNumber;              // verify number
 uint8_t verifyResult;               // received verify result
-char printBuff[4];                  // for sprintf()
+char printBuff[500];                // for sprintf() holding URL and data
 String  txdata = "";                // transmission data packet string
 String  rxdata = "";                // received data packet string
 bool operationDone = false;         // receive or transmit operation done
@@ -141,12 +141,13 @@ void printCatPacket(const CatPacket &packet) {
 char * formatCatPacket(const CatPacket &packet, char *buffer, size_t bufferSize) {
   int offset = 0;
   offset += snprintf(buffer + offset, bufferSize - offset, "%s", uploadURL);
-  offset += snprintf(buffer + offset, bufferSize - offset, "?scan_id=%u,", packet.fields.packetNumber);
-  offset += snprintf(buffer + offset, bufferSize - offset, "&cat_vbatt=%u,", packet.fields.vbatt);
-  offset += snprintf(buffer + offset, bufferSize - offset, "&cat_rssi=%d,", packet.fields.rssi);
-  offset += snprintf(buffer + offset, bufferSize - offset, "&cat_snr=%d,", packet.fields.snr);
-  offset += snprintf(buffer + offset, bufferSize - offset, "&ap_rssi=%d,", rssi);
-  offset += snprintf(buffer + offset, bufferSize - offset, "&ap_snr=%d,", snr);
+  offset += snprintf(buffer + offset, bufferSize - offset, "?scan_id=%u", packet.fields.packetNumber);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&cat_vbatt=%u", packet.fields.vbatt);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&cat_rssi=%d", packet.fields.rssi);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&cat_snr=%d", packet.fields.snr);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&sta_vbatt=%u", Vbatt);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&sta_rssi=%d", rssi);
+  offset += snprintf(buffer + offset, bufferSize - offset, "&sta_snr=%d", snr);
 
   for (uint8_t i = 0; i < packet.fields.apCount && i < MAX_APS_IN_PACKET; ++i) {
     char mac[18];
@@ -155,7 +156,7 @@ char * formatCatPacket(const CatPacket &packet, char *buffer, size_t bufferSize)
              packet.fields.apList[i].bssid[2], packet.fields.apList[i].bssid[3],
              packet.fields.apList[i].bssid[4], packet.fields.apList[i].bssid[5]);
 
-    offset += snprintf(buffer + offset, bufferSize - offset, "&bssid[]=%s,&rssi[]=%d",
+    offset += snprintf(buffer + offset, bufferSize - offset, "&bssid[]=%s&rssi[]=%d",
                        mac, packet.fields.apList[i].rssi);
   }
   return buffer;
@@ -311,7 +312,6 @@ void loop()
   do {  
     Serial.println("******** Station transmitting query packet ********");
       
-    Vbatt = 3999; // sample
 
     // transmit data setting
     stationPacket.fields.waitTime = TX_INTERVAL/1000 -22;  // forced inactivity time for cat transmitter before listening again [sec]
@@ -388,18 +388,6 @@ void loop()
     rxdata.toUpperCase();
     Serial.println(rxdata);
 
-    // restoration of received data
-    rssi = catPacket.fields.rssi;  // RSSI   min. -127[dBm]
-    snr = catPacket.fields.snr;   // SNR
-    Vbatt = catPacket.fields.vbatt; // battery voltage [mV]
-    int bssidCount = catPacket.fields.apCount; // number of APs in packet
-
-    // random number verification
-    if(randomNumber == verifyNumber) {
-      verifyResult = 1;    
-    } else {
-      verifyResult = 0;
-    }
 
     Serial.print("local RSSI:\t\t"); Serial.print(radio.getRSSI()); Serial.println(" dBm");
     Serial.print("local SNR:\t\t"); Serial.print(radio.getSNR()); Serial.println(" dB");
@@ -421,11 +409,11 @@ void loop()
     display.clearDisplay();
     display.setCursor(64, 15); display.print("Received");  
     display.setCursor(0, 31); display.print(radio.getRSSI()); display.print(" ");
-    display.setCursor(80, 31); display.print(Vbatt/1000.0); display.print(" V");   
+    display.setCursor(80, 31); display.print(catPacket.fields.vbatt/1000.0); display.print(" V");   
     display.setCursor(0, 47); display.print(verifyNumber, HEX);
     display.setCursor(80, 47); display.print(verifyResult ? "good" : "bad");
-    display.setCursor(0, 63); display.print(rssi); display.print(" dBm");
-    display.setCursor(80, 63); display.print(snr); display.print(" dB");
+    display.setCursor(0, 63); display.print(catPacket.fields.rssi); display.print(" dBm");
+    display.setCursor(80, 63); display.print(catPacket.fields.snr); display.print(" dB");
 
     display.sendBuffer();
   }
