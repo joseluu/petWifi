@@ -288,7 +288,7 @@ void loop()
   Serial.println("***cat** Waiting for incoming station packet ********");
   memset(stationPacket.bytes, 0, sizeof(stationPacket.bytes));
   // start listening for LoRa packets
-  digitalWrite(LED_BUILTIN, LOW);
+  digitalWrite(LED_BUILTIN, HIGH);
       operationDone = false;    
       state = radio.startReceiveDutyCycleAuto(LORA_PREAMBLE_LEN, sizeof(stationPacket.bytes));  // duty cycle auto Rx mode 
       // check if the flag is set
@@ -297,7 +297,7 @@ void loop()
       while(!operationDone & ((millis() - timeoutCheck) < CHECK_INTERVAL)) {
         delay(1);
       }   
-  digitalWrite(LED_BUILTIN, HIGH);
+  digitalWrite(LED_BUILTIN, LOW);
 
   // received status check  
   if (state != RADIOLIB_ERR_NONE) {
@@ -355,7 +355,7 @@ void loop()
       errorBlink_1(3);                        // error [[ 3 ]]    
       goto loop_again;              
     }
-    digitalWrite(LED_BUILTIN, HIGH);
+    digitalWrite(LED_BUILTIN, LOW);
 
   
     
@@ -388,7 +388,6 @@ void loop()
 
     // start transmission
     txtime = millis();
-    digitalWrite(LED_BUILTIN, LOW);
         operationDone = false;
         state = radio.startTransmit(catPacket.bytes, sizeof(catPacket.bytes));
 
@@ -397,7 +396,6 @@ void loop()
         while(!operationDone & ((millis() - timeoutCheck) < CHECK_INTERVAL)) {
           delay(1);
         }
-    digitalWrite(LED_BUILTIN, HIGH);
     txDuration = millis() - txtime;
     processTime = millis() - rxTime;
     Serial.print("Transmission time [ms]: "); Serial.println(txDuration);
@@ -411,7 +409,6 @@ void loop()
     txdata.toUpperCase();
     Serial.println(txdata);
 
-
     // error status check
     if (state == RADIOLIB_ERR_NONE) {
       // packet was successfully sent
@@ -422,9 +419,16 @@ void loop()
       Serial.print("failed, code ");
       Serial.println(state);
     }
-    digitalWrite(LED_BUILTIN, LOW);
+    digitalWrite(LED_BUILTIN, HIGH);
     Serial.printf("entering forced delay for %d sec\n", stationPacket.fields.waitTime);
-    delay(stationPacket.fields.waitTime * 1000);  // forced inactivity time
+    for (int i = 0; i < stationPacket.fields.waitTime; i++) {
+      Serial.print(".");
+      delay(900);
+      digitalWrite(LED_BUILTIN, LOW);
+      delay(100);
+      digitalWrite(LED_BUILTIN, HIGH);
+    }
+    Serial.println();
   }
   loop_again:
   delay(100);

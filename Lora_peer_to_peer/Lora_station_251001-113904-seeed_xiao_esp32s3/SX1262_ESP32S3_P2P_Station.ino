@@ -312,7 +312,7 @@ void loop()
   do {  
     Serial.println("******** Station transmitting query packet ********");
       
-
+    Vbatt = analogReadMilliVolts(A0);          // read battery voltage [mV]
     // transmit data setting
     stationPacket.fields.waitTime = TX_INTERVAL/1000 -22;  // forced inactivity time for cat transmitter before listening again [sec]
 
@@ -388,9 +388,11 @@ void loop()
     rxdata.toUpperCase();
     Serial.println(rxdata);
 
+    rssi = radio.getRSSI();
+    snr = radio.getSNR();
 
-    Serial.print("local RSSI:\t\t"); Serial.print(radio.getRSSI()); Serial.println(" dBm");
-    Serial.print("local SNR:\t\t"); Serial.print(radio.getSNR()); Serial.println(" dB");
+    Serial.print("local RSSI:\t\t"); Serial.print(rssi); Serial.println(" dBm");
+    Serial.print("local SNR:\t\t"); Serial.print(snr); Serial.println(" dB");
 
     printCatPacket(catPacket);
     uint32_t currentCatBssidsCRC32 = calculateCatBssidsCRC32(catPacket);
@@ -407,9 +409,9 @@ void loop()
     }
 
     display.clearDisplay();
-    display.setCursor(64, 15); display.print("Received");  
-    display.setCursor(0, 31); display.print(radio.getRSSI()); display.print(" ");
-    display.setCursor(80, 31); display.print(catPacket.fields.vbatt/1000.0); display.print(" V");   
+    display.setCursor(64, 15); display.print("Received");
+    display.setCursor(0, 31); display.print(rssi); display.print(" ");
+    display.setCursor(80, 31); display.print(catPacket.fields.vbatt/1000.0); display.print(" V");
     display.setCursor(0, 47); display.print(verifyNumber, HEX);
     display.setCursor(80, 47); display.print(verifyResult ? "good" : "bad");
     display.setCursor(0, 63); display.print(catPacket.fields.rssi); display.print(" dBm");
