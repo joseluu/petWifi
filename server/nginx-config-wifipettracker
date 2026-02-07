@@ -1,0 +1,19 @@
+server {
+	server_name wifi-pet-tracker.duckdns.org;
+	location /testing
+		proxy_pass http://localhost:4202/;
+	}
+	location / {
+		proxy_pass http://localhost:4201;
+	}
+
+
+}
+#server {
+#	listen 80;
+#	listen [::]:80;
+#
+#	server_name wifi-pet-tracker.duckdns.org;
+#}
+
+
