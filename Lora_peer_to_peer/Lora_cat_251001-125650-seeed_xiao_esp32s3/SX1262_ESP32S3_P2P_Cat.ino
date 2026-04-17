@@ -17,6 +17,7 @@
 #include "esp_idf_version.h"
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
+#include "esp_sleep.h"
 
 #ifndef ESP_IDF_VERSION_VAL
 #define ESP_IDF_VERSION_VAL(major, minor, patch)  ((major)*1000 + (minor)*100 + (patch))
@@ -350,12 +351,14 @@ void loop()
   }
   Serial.println();
 
-  // sleep the remainder of the 60 s cycle
+  // light sleep the remainder of the 60 s cycle
   uint32_t elapsed = millis() - cycleStart;
   if (elapsed < CAT_TX_INTERVAL) {
     uint32_t remaining = CAT_TX_INTERVAL - elapsed;
-    Serial.printf("sleeping %lu ms until next cycle\n", (unsigned long)remaining);
-    delay(remaining);
+    Serial.printf("light sleep %lu ms until next cycle\n", (unsigned long)remaining);
+    Serial.flush();
+    esp_sleep_enable_timer_wakeup((uint64_t)remaining * 1000ULL);
+    esp_light_sleep_start();
   }
 }
 
