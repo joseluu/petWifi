@@ -5,9 +5,10 @@
 // [NOTE] When upload, BOOT+RESET:ON, RESET:OFF, then BOOT:OFF
 
 
-// 1. wait for a packet from station
-// 2. receives station data 11 bytes(stationUID 4, randomNumber 4, Vbatt 2, (previous)veryfiResult 1)
-// 3. transmits response data 11 bytes(catUID 4, verifyNumber 4, rssi 1, snr 1, interval 1)
+// Transmit-only protocol (no station handshake):
+// 1. scan Wi-Fi passive on 2.4 GHz channels
+// 2. transmit CatPacket (UID, packetNumber, Vbatt, rssi, snr, interval, apCount, apList[5])
+// 3. sleep until next CAT_TX_INTERVAL (60 s)
 
 // 2025/04/04
 
@@ -37,7 +38,9 @@ wifi_ap_record_t ap_records[MAX_AP_RECORDS];
 
 #include "../Lora_station_251001-113904-seeed_xiao_esp32s3/include/packet.h"
 
-#define CHECK_INTERVAL  10000   // communication check interval [mS]
+#define CHECK_INTERVAL     10000   // legacy communication check interval [mS] (unused in transmit-only mode)
+#define CAT_TX_INTERVAL    60000   // cat transmits every 60 s
+#define TX_TIMEOUT         15000   // upper bound on CatPacket airtime at SF12/BW62.5/CR4/8 (~10 s)
 #define RF_SW           D5      // RF Switch
 
 #define ESP32_S3_MOSI_PIN 9
@@ -277,161 +280,83 @@ void sort_scan_results_by_rssi(wifi_ap_record_t records[], uint16_t count) {
 }
 
 // ***********************************************************************************************************
-StationPacket stationPacket;
+// Transmit-only protocol: scan Wi-Fi, transmit CatPacket, sleep until next CAT_TX_INTERVAL.
+// No handshake with station.
 CatPacket catPacket;
-void loop() 
+void loop()
 {
-  int txtime;
-  int rxTime;
-  int txDuration;
-  int processTime;
-  Serial.println("***cat** Waiting for incoming station packet ********");
-  memset(stationPacket.bytes, 0, sizeof(stationPacket.bytes));
-  // start listening for LoRa packets
-  digitalWrite(LED_BUILTIN, HIGH);
-      operationDone = false;    
-      state = radio.startReceiveDutyCycleAuto(LORA_PREAMBLE_LEN, sizeof(stationPacket.bytes));  // duty cycle auto Rx mode 
-      // check if the flag is set
-      // If not received, proceed to next communication cycle to atempt synchronization recovery
-      timeoutCheck = millis();
-      while(!operationDone & ((millis() - timeoutCheck) < CHECK_INTERVAL)) {
-        delay(1);
-      }   
-  digitalWrite(LED_BUILTIN, LOW);
+  static uint8_t catPacketNumber = 0;
+  uint32_t cycleStart = millis();
+  uint32_t txtime;
+  uint32_t txDuration;
 
-  // received status check  
-  if (state != RADIOLIB_ERR_NONE) {
-    Serial.print("radio.startReceive() failed code ");
-    Serial.println(state);
-    errorBlink_1(2);                        // error [[ 2 ]]
-  } else {
+  Serial.println("***cat** Scanning Wi-Fi ********");
 
-    // read a packet 
-    state = radio.readData(stationPacket.bytes, sizeof(stationPacket.bytes));
-
-    if (state == RADIOLIB_ERR_NONE && 
-        stationPacket.fields.UID == STATION_UID &&
-        stationPacket.fields.packetNumber != 0) {   // Check Station ID
-      rxTime = millis();
-      // successful read
-      rxdata = "";
-      for(int i = 0; i < sizeof(stationPacket.bytes); i++) {
-        sprintf(printBuff, "%02x", stationPacket.bytes[i]);
-        rxdata += printBuff;
-      }
-      Serial.print("Received Data: ");
-      Serial.println(rxdata);
-      receivedTime = millis();
-      receivedInterval = (receivedTime - timestamp) / 1000;       // [sec]
-      timestamp = receivedTime;
-
-
-      Serial.printf("Sender UID:\t%08x\n", stationPacket.fields.UID);    
-      Serial.print("Packet Number:\t"); Serial.println(stationPacket.fields.packetNumber);
-      Serial.print("Forced inactivity time:\t"); Serial.print(stationPacket.fields.waitTime); Serial.println(" sec");
-
-      // RSSI and SNR of the last received packet
-      rssi = radio.getRSSI();
-      Serial.print("local RSSI:\t\t"); Serial.print(rssi); Serial.println(" dBm");
-      snr = radio.getSNR();
-      Serial.print("local SNR:\t\t"); Serial.print(snr); Serial.println(" dB");
-
-    } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
-      // packet was received, but is malformed
-      Serial.println("******** CRC error ********");
-      goto loop_again;  
-    } else if (state == 0) {
-      Serial.print("radio.readData() unproductive, code 0 packetNumber:");
-      Serial.print(stationPacket.fields.packetNumber);
-      Serial.print(" or bad sender UID: ");
-      Serial.println(stationPacket.fields.UID, HEX);
-      goto loop_again;
-    } else {
-      // some other error occurred when receiving
-      Serial.print("radio.readData() failed, code ");
-      Serial.print(state);
-      Serial.print(" or bad sender UID: ");
-      Serial.println(stationPacket.fields.UID, HEX);
-      errorBlink_1(3);                        // error [[ 3 ]]    
-      goto loop_again;              
-    }
-    digitalWrite(LED_BUILTIN, LOW);
-
-  
-    
-    /******** Scanning channels ********/
+  /******** Scanning channels ********/
 #ifdef USING_ESP_IDF_V5_5_OR_LATER
-      start_passive_scan_multi_channel();
+  start_passive_scan_multi_channel();
 #else
-      start_passive_scan_enumerate_channels();
+  start_passive_scan_enumerate_channels();
 #endif
-    sort_scan_results_by_rssi(ap_records, ap_count);
-    print_scan_results();
+  sort_scan_results_by_rssi(ap_records, ap_count);
+  print_scan_results();
 
-    
-    Serial.println("******** Transmitting response packet ********");
+  Serial.println("******** Transmitting cat packet ********");
 
-    Vbatt = 3.999;  // sample
+  Vbatt = 3999;  // sample [mV] — no battery divider wired yet
+  catPacketNumber++;
 
-    // transmit data setting
-    catPacket.fields.UID = stationPacket.fields.UID;         // confirmed Station device UID
-    catPacket.fields.packetNumber = stationPacket.fields.packetNumber; // echo back packet number
-    catPacket.fields.vbatt = Vbatt;                   // battery voltage [mV]
-    catPacket.fields.rssi = rssi;                   // Cat RSSI  [dBm]
-    catPacket.fields.snr = snr;                     // Cat SN ratio  [dB]
-
-    catPacket.fields.apCount = std::min((int)ap_count, MAX_APS_IN_PACKET);
-    // copy AP records to packet
-    for (uint8_t i = 0; i < ap_count && i < MAX_APS_IN_PACKET; i++) {
-      catPacket.fields.apList[i] = AccessPoint(ap_records[i].bssid, ap_records[i].rssi, ap_records[i].primary);
-    }
-
-    // start transmission
-    txtime = millis();
-        operationDone = false;
-        state = radio.startTransmit(catPacket.bytes, sizeof(catPacket.bytes));
-
-        // wait for transmittion completion
-        timeoutCheck = millis();
-        while(!operationDone & ((millis() - timeoutCheck) < CHECK_INTERVAL)) {
-          delay(1);
-        }
-    txDuration = millis() - txtime;
-    processTime = millis() - rxTime;
-    Serial.print("Transmission time [ms]: "); Serial.println(txDuration);
-    Serial.print("Processing time [ms]: "); Serial.println(processTime);
-    // serial print transmitted data
-    txdata = "";
-    for(int i = 0; i < sizeof(catPacket.bytes); i++) {
-      sprintf(printBuff, "%02x", catPacket.bytes[i]);
-      txdata += printBuff;
-    }
-    txdata.toUpperCase();
-    Serial.println(txdata);
-
-    // error status check
-    if (state == RADIOLIB_ERR_NONE) {
-      // packet was successfully sent
-      Serial.println("transmission done!");
-      Serial.println();
-    } else {
-      // some other error occurred
-      Serial.print("failed, code ");
-      Serial.println(state);
-    }
-    digitalWrite(LED_BUILTIN, HIGH);
-    Serial.printf("entering forced delay for %d sec\n", stationPacket.fields.waitTime);
-    for (int i = 0; i < stationPacket.fields.waitTime; i++) {
-      Serial.print(".");
-      delay(900);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(100);
-      digitalWrite(LED_BUILTIN, HIGH);
-    }
-    Serial.println();
+  catPacket.fields.UID = CAT_UID;
+  catPacket.fields.packetNumber = catPacketNumber;
+  catPacket.fields.vbatt = Vbatt;
+  catPacket.fields.rssi = 0;                          // no incoming packet to measure
+  catPacket.fields.snr = 0;
+  catPacket.fields.interval = CAT_TX_INTERVAL / 1000; // seconds
+  catPacket.fields.apCount = std::min((int)ap_count, MAX_APS_IN_PACKET);
+  for (uint8_t i = 0; i < ap_count && i < MAX_APS_IN_PACKET; i++) {
+    catPacket.fields.apList[i] = AccessPoint(ap_records[i].bssid, ap_records[i].rssi, ap_records[i].primary);
   }
-  loop_again:
-  delay(100);
+
+  digitalWrite(LED_BUILTIN, LOW);
+  txtime = millis();
+  operationDone = false;
+  state = radio.startTransmit(catPacket.bytes, sizeof(catPacket.bytes));
+
+  timeoutCheck = millis();
+  while(!operationDone && ((millis() - timeoutCheck) < TX_TIMEOUT)) {
+    delay(1);
+  }
+  txDuration = millis() - txtime;
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  Serial.printf("Cat UID:\t%08x\n", catPacket.fields.UID);
+  Serial.print("Packet Number:\t"); Serial.println(catPacket.fields.packetNumber);
+  Serial.print("AP Count:\t"); Serial.println(catPacket.fields.apCount);
+  Serial.print("Transmission time [ms]: "); Serial.println(txDuration);
+
+  txdata = "";
+  for(int i = 0; i < sizeof(catPacket.bytes); i++) {
+    sprintf(printBuff, "%02x", catPacket.bytes[i]);
+    txdata += printBuff;
+  }
+  txdata.toUpperCase();
+  Serial.println(txdata);
+
+  if (state == RADIOLIB_ERR_NONE && operationDone) {
+    Serial.println("transmission done!");
+  } else {
+    Serial.print("transmit failed or timed out, code ");
+    Serial.println(state);
+  }
+  Serial.println();
+
+  // sleep the remainder of the 60 s cycle
+  uint32_t elapsed = millis() - cycleStart;
+  if (elapsed < CAT_TX_INTERVAL) {
+    uint32_t remaining = CAT_TX_INTERVAL - elapsed;
+    Serial.printf("sleeping %lu ms until next cycle\n", (unsigned long)remaining);
+    delay(remaining);
+  }
 }
 
 //****************************************************************************************

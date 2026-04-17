@@ -4,10 +4,9 @@
 //----------------------------------------------------------------------------------------------
 // [NOTE] When upload, BOOT+RESET:ON, RESET:OFF, then BOOT:OFF
 
-// 1. transmit data 11 bytes(stationUID 4, randomNumber 4, Vbatt 2, (previous)veryfiResult 1)
-// 2. wait for response from cat
-// 3. receive data 11 bytes(catUID 4, verifyNumber 4, rssi 1, snr 1, interval 1)
-// 4. verify sent randomNumber with received verifyNumber
+// Receive-only protocol (no station transmission):
+// 1. continuously listen for CatPackets
+// 2. on reception, verify UID == CAT_UID and upload to server if BSSID set changed
 
 
 
@@ -25,8 +24,7 @@
 #include "packet.h"
 #include "network_creds.h"      // WiFi SSID and Password
 
-#define CHECK_INTERVAL  10000  // communication check interval [mS]
-#define TX_INTERVAL     30000  // depend on the erea rules, total of 360 sec or less per hour
+#define RX_POLL_TIMEOUT 120000 // re-arm receiver if nothing heard for this long [mS]
 
 #define RF_SW          D5       // RF Switch
 #define sd_sck         D8       // Arduino SPI library uses VSPI circuit
@@ -303,83 +301,45 @@ void setup() {
 
 
 // ***********************************************************************************************************
-StationPacket stationPacket;
+// Receive-only loop: re-arm radio, wait for CatPacket, process, repeat.
 CatPacket catPacket;
-void loop() 
+void loop()
 {
-  uint32_t processTime;
-  uint32_t delayTime;
-  do {  
-    Serial.println("******** Station transmitting query packet ********");
-      
-    Vbatt = analogReadMilliVolts(A0);          // read battery voltage [mV]
-    // transmit data setting
-    stationPacket.fields.waitTime = TX_INTERVAL/1000 -22;  // forced inactivity time for cat transmitter before listening again [sec]
+  Serial.println("******** Station waiting for cat packet ********");
+  display.clearDisplay();
+  display.setCursor(0, 15); display.print("Listening...");
+  display.sendBuffer();
 
+  Vbatt = analogReadMilliVolts(A0);          // station's own battery (for logging/upload)
 
-    // transmit a packet
-    txtime = millis(); 
-    uint16_t sec = txtime / 1000;                   // transmission time [sec] 
-
-    stationPacket.incrementPacketNumber();
-    digitalWrite(LED_BUILTIN, LOW);
-        operationDone = false;
-        state = radio.startTransmit(stationPacket.bytes, sizeof(stationPacket.bytes));
-
-        // wait for transmittion completion
-        timeoutCheck = millis();
-        while(!operationDone & ((millis() - timeoutCheck) < CHECK_INTERVAL)) {
-          delay(1);
-        }
-    digitalWrite(LED_BUILTIN, HIGH);
-   
-    // print and display transmitted data
-    txdata = "";
-    for(int i = 0; i < sizeof(stationPacket.bytes); i++) {
-      sprintf(printBuff, "%02x", stationPacket.bytes[i]);
-      txdata += printBuff;
-    }
-    txdata.toUpperCase();
-    Serial.println(txdata);
-
-    Serial.print("Transmit Station UID:\t"); Serial.println(stationPacket.fields.UID, HEX);  
-    Serial.print("Transmit packet number:\t"); Serial.println(stationPacket.fields.packetNumber);  
-    Serial.print("Forced inactivity Time:\t\t"); Serial.print(stationPacket.fields.waitTime); Serial.println(" sec");
-    Serial.println();
-
-    display.setCursor(0, 15); display.print(" Tr");    
-    display.sendBuffer();    
-  } while(state != RADIOLIB_ERR_NONE);  // if status error, transmit again
-
-//-------------------------------------------------------------------------------------------------
-  Serial.println("*station** Transmit done: Waiting for incoming cat response ******** ");
-
-  // start listening for LoRa packets
+  // arm receiver
   digitalWrite(LED_BUILTIN, LOW);
-      operationDone = false;    
-      state = radio.startReceive();
-
-      // check the flag
-      // If not received, proceed to next communication cycle to atempt synchronization recovery
-      timeoutCheck = millis();
-      while(!operationDone & ((millis() - timeoutCheck) < CHECK_INTERVAL)) {
-        delay(1);
-      }  
-  digitalWrite(LED_BUILTIN, HIGH);
-
-  // received status check  
+  operationDone = false;
+  state = radio.startReceive();
   if (state != RADIOLIB_ERR_NONE) {
-    Serial.print("failed code ");
-    Serial.println(state);
-    errorBlink_1(2);                        // error [[ 2 ]]
+    Serial.print("startReceive failed, code "); Serial.println(state);
+    errorBlink_1(2);
+    delay(1000);
+    return;
   }
 
-  // read a received packet 
-  state = radio.readData(catPacket.bytes, sizeof(catPacket.bytes));
+  // wait up to RX_POLL_TIMEOUT; on timeout we simply re-arm on next loop iteration
+  timeoutCheck = millis();
+  while(!operationDone && ((millis() - timeoutCheck) < RX_POLL_TIMEOUT)) {
+    delay(1);
+  }
+  digitalWrite(LED_BUILTIN, HIGH);
 
-  // read status and Station UID check
+  if (!operationDone) {
+    Serial.println("rx timeout, re-arming");
+    return;
+  }
+
+  txtime = millis();
+  state = radio.readData(catPacket.bytes, sizeof(catPacket.bytes));
   senderuid = catPacket.fields.UID;
-  if (state == RADIOLIB_ERR_NONE && senderuid == STATION_UID) {   // check status and Station UID
+
+  if (state == RADIOLIB_ERR_NONE && senderuid == CAT_UID) {
     rxdata = "";
     for(int i = 0; i < sizeof(catPacket.bytes); i++) {
       sprintf(printBuff, "%02x", catPacket.bytes[i]);
@@ -390,13 +350,12 @@ void loop()
 
     rssi = radio.getRSSI();
     snr = radio.getSNR();
-
     Serial.print("local RSSI:\t\t"); Serial.print(rssi); Serial.println(" dBm");
     Serial.print("local SNR:\t\t"); Serial.print(snr); Serial.println(" dB");
 
     printCatPacket(catPacket);
     uint32_t currentCatBssidsCRC32 = calculateCatBssidsCRC32(catPacket);
-    if (currentCatBssidsCRC32 == previousCatBssidsCRC32){
+    if (currentCatBssidsCRC32 == previousCatBssidsCRC32) {
       Serial.println("Same Cat BSSIDs, cat did not move.");
     } else {
       previousCatBssidsCRC32 = currentCatBssidsCRC32;
@@ -404,34 +363,28 @@ void loop()
       char * formattedData = formatCatPacket(catPacket, printBuff, sizeof(printBuff));
       Serial.println("Formatted Data for Upload:");
       Serial.println(formattedData);
-      // Here you can add code to upload the formatted data to your server
       uploadDataToServer(formattedData);
     }
 
     display.clearDisplay();
     display.setCursor(64, 15); display.print("Received");
-    display.setCursor(0, 31); display.print(rssi); display.print(" ");
+    display.setCursor(0, 31); display.print(rssi); display.print(" dBm");
     display.setCursor(80, 31); display.print(catPacket.fields.vbatt/1000.0); display.print(" V");
-    display.setCursor(0, 47); display.print(verifyNumber, HEX);
-    display.setCursor(80, 47); display.print(verifyResult ? "good" : "bad");
+    display.setCursor(0, 47); display.print("pkt ");
+    display.setCursor(32, 47); display.print(catPacket.fields.packetNumber);
+    display.setCursor(80, 47); display.print("ap ");
+    display.setCursor(104, 47); display.print(catPacket.fields.apCount);
     display.setCursor(0, 63); display.print(catPacket.fields.rssi); display.print(" dBm");
     display.setCursor(80, 63); display.print(catPacket.fields.snr); display.print(" dB");
-
     display.sendBuffer();
+  } else if (state == RADIOLIB_ERR_NONE) {
+    Serial.print("received but wrong UID: 0x"); Serial.println(senderuid, HEX);
+  } else {
+    Serial.print("receive failed, code "); Serial.println(state);
+    errorBlink_1(3);
   }
-  else {
-    // error occurred when receiving
-    Serial.print("receive failed, code ");
-    Serial.println(state);
-    errorBlink_1(3);                        // error [[ 3 ]]
-  }  
-  digitalWrite(LED_BUILTIN, HIGH);
-  processTime = millis() - txtime;
-  Serial.print("Processing time [ms]: "); Serial.println(processTime);
-  delayTime = TX_INTERVAL - (millis() - txtime);
-  Serial.print("******** now waiting for next transmit in :\t"); Serial.print((delayTime)/1000); Serial.println(" sec");
-  // wait for transmit interval
-  delay(delayTime);
+
+  Serial.print("Processing time [ms]: "); Serial.println(millis() - txtime);
 }
 
 
