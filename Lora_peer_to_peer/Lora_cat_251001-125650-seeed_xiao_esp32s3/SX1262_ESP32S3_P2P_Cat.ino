@@ -142,12 +142,11 @@ void setup() {
   // callback function when receive or transmit operation done
   radio.setDio1Action(setFlag);
 
-    // Initial Wi-Fi setup
+    // Initial Wi-Fi setup (started/stopped per cycle in loop)
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
   ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-  ESP_ERROR_CHECK(esp_wifi_start());
 
 }
 // ***********************************************************************************************************
@@ -294,6 +293,7 @@ void loop()
   Serial.println("***cat** Scanning Wi-Fi ********");
 
   /******** Scanning channels ********/
+  ESP_ERROR_CHECK(esp_wifi_start());
 #ifdef USING_ESP_IDF_V5_5_OR_LATER
   start_passive_scan_multi_channel();
 #else
@@ -301,6 +301,7 @@ void loop()
 #endif
   sort_scan_results_by_rssi(ap_records, ap_count);
   print_scan_results();
+  ESP_ERROR_CHECK(esp_wifi_stop());
 
   Serial.println("******** Transmitting cat packet ********");
 
