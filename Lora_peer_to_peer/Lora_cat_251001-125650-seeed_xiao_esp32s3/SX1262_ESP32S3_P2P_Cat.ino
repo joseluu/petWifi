@@ -18,6 +18,9 @@
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
 #include "esp_sleep.h"
+#include "esp32-hal-cpu.h"
+
+#define CAT_FW_VERSION "v1.0.1"
 
 #ifndef ESP_IDF_VERSION_VAL
 #define ESP_IDF_VERSION_VAL(major, minor, patch)  ((major)*1000 + (minor)*100 + (patch))
@@ -322,6 +325,9 @@ void loop()
   digitalWrite(LED_BUILTIN, LOW);
   txtime = millis();
   operationDone = false;
+
+  uint32_t originalFreq = getCpuFrequencyMhz();
+  setCpuFrequencyMhz(80);
   state = radio.startTransmit(catPacket.bytes, sizeof(catPacket.bytes));
 
   timeoutCheck = millis();
@@ -329,8 +335,10 @@ void loop()
     delay(1);
   }
   txDuration = millis() - txtime;
+  setCpuFrequencyMhz(originalFreq);
   digitalWrite(LED_BUILTIN, HIGH);
 
+  Serial.print("Cat FW:\t"); Serial.println(CAT_FW_VERSION);
   Serial.printf("Cat UID:\t%08x\n", catPacket.fields.UID);
   Serial.print("Packet Number:\t"); Serial.println(catPacket.fields.packetNumber);
   Serial.print("AP Count:\t"); Serial.println(catPacket.fields.apCount);
