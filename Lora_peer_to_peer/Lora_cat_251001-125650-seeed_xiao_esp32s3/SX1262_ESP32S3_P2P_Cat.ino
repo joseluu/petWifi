@@ -21,7 +21,7 @@
 #include "esp32-hal-cpu.h"
 #include "esp_bt.h"
 
-#define CAT_FW_VERSION "v1.0.2"
+#define CAT_FW_VERSION "v1.0.3"
 
 #ifndef ESP_IDF_VERSION_VAL
 #define ESP_IDF_VERSION_VAL(major, minor, patch)  ((major)*1000 + (minor)*100 + (patch))
@@ -116,6 +116,11 @@ void setup() {
   // BT never used on this cat (only Wi-Fi scan + LoRa). Release the BLE
   // controller memory up front so the domain stays powered down.
   esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
+
+  // Drop the RTC peripheral domain during light sleep between cycles.
+  // (ESP32-S3 SoC only supports PD on RTC_PERIPH; SLOW_MEM / FAST_MEM are not
+  // separately power-gatable on this chip.)
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
 
   // Station UID
   Serial.print("Station UID "); Serial.println(STATION_UID, HEX);
@@ -327,7 +332,12 @@ void loop()
     catPacket.fields.apList[i] = AccessPoint(ap_records[i].bssid, ap_records[i].rssi, ap_records[i].primary);
   }
 
+  // Brief LED pulse as a TX-start marker; keeping it on for the full ~12 s TX
+  // was ~5 mA continuous drain. 100 ms is still visible to the naked eye.
   digitalWrite(LED_BUILTIN, LOW);
+  delay(100);
+  digitalWrite(LED_BUILTIN, HIGH);
+
   txtime = millis();
   operationDone = false;
 
@@ -341,7 +351,6 @@ void loop()
   }
   txDuration = millis() - txtime;
   setCpuFrequencyMhz(originalFreq);
-  digitalWrite(LED_BUILTIN, HIGH);
 
   Serial.print("Cat FW:\t"); Serial.println(CAT_FW_VERSION);
   Serial.printf("Cat UID:\t%08x\n", catPacket.fields.UID);
