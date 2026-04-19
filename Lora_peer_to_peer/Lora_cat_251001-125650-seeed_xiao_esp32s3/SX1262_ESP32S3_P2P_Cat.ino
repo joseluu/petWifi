@@ -19,8 +19,9 @@
 #include "esp_wifi_types.h"
 #include "esp_sleep.h"
 #include "esp32-hal-cpu.h"
+#include "esp_bt.h"
 
-#define CAT_FW_VERSION "v1.0.1"
+#define CAT_FW_VERSION "v1.0.2"
 
 #ifndef ESP_IDF_VERSION_VAL
 #define ESP_IDF_VERSION_VAL(major, minor, patch)  ((major)*1000 + (minor)*100 + (patch))
@@ -111,6 +112,10 @@ uint32_t timestamp;                 // previouse received time [mS]
 // *******************************************************************************************************
 void setup() {
   Serial.begin(115200);
+
+  // BT never used on this cat (only Wi-Fi scan + LoRa). Release the BLE
+  // controller memory up front so the domain stays powered down.
+  esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
 
   // Station UID
   Serial.print("Station UID "); Serial.println(STATION_UID, HEX);
