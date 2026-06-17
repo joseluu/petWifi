@@ -75,19 +75,52 @@ def init_db():
     conn.commit()
     conn.close()
 
+# A BSSID that WiGLE cannot locate is cached as a row with NULL lat/lon so we
+# stop re-querying the (rate-limited) WiGLE API for it on every scan -- that
+# repeated querying was exhausting the daily quota (HTTP 429). Such "not found"
+# entries are re-checked at most once per NEGATIVE_TTL in case WiGLE later adds
+# the AP.
+NEGATIVE_TTL = datetime.timedelta(days=30)
+
+
+def _negative_cache_valid(lastupdt):
+    """True if a negative (not-found) cache entry is still fresh."""
+    if not lastupdt:
+        return False
+    try:
+        ts = datetime.datetime.fromisoformat(lastupdt)
+    except (ValueError, TypeError):
+        return False
+    return datetime.datetime.now() - ts < NEGATIVE_TTL
+
+
 def get_ap_location(bssid):
-    """Query local database first, then WiGLE API if BSSID is missing."""
+    """Query local database first, then WiGLE API if BSSID is missing.
+
+    Both successful and "not found" results are cached, so an un-locatable
+    BSSID is not re-queried against WiGLE on every scan. Transient failures
+    (HTTP errors, rate limiting, network problems) are NOT cached and will be
+    retried on the next scan.
+    """
+    bssid = bssid.upper()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('SELECT lat, lon FROM ap_locations WHERE bssid = ?', (bssid.upper(),))
+    cursor.execute('SELECT lat, lon, lastupdt FROM ap_locations WHERE bssid = ?', (bssid,))
     result = cursor.fetchone()
     if result:
-        conn.close()
-        return {'lat': result[0], 'lon': result[1], 'error': None}
+        lat, lon, lastupdt = result
+        if lat is not None and lon is not None:
+            conn.close()
+            return {'lat': lat, 'lon': lon, 'error': None}
+        # Negative cache entry: WiGLE previously had no location for this BSSID.
+        if _negative_cache_valid(lastupdt):
+            conn.close()
+            return {'lat': None, 'lon': None, 'error': None}
+        # Stale negative entry: fall through and re-query WiGLE.
 
-    # BSSID not in local database, query WiGLE API
+    # BSSID unknown (or stale negative), query WiGLE API
     params = {
-        'netid': bssid.upper(),
+        'netid': bssid,
         'onlymine': 'false',
         'freenet': 'false',
         'paynet': 'false'
@@ -97,31 +130,43 @@ def get_ap_location(bssid):
     try:
         response = requests.get(WIGLE_API_URL, params=params, auth=HTTPBasicAuth(WIGLE_USER, WIGLE_TOKEN), headers=headers)
         logging.info(f"WiGLE API response status for BSSID {bssid}: {response.status_code}")
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('success') and data.get('resultCount', 0) > 0:
-                result = data['results'][0]
-                lat = result.get('trilat')
-                lon = result.get('trilong')
-                if lat is not None and lon is not None:
-                    cursor.execute('INSERT INTO ap_locations (bssid, lat, lon) VALUES (?, ?, ?)',
-                                   (bssid.upper(), lat, lon))
-                    conn.commit()
-                    conn.close()
-                    return {'lat': lat, 'lon': lon, 'error': None}
-                else:
-                    conn.close()
-                    return {'lat': None, 'lon': None, 'error': 'WiGLE returned no location data'}
-            else:
-                conn.close()
-                error_msg = f"WiGLE API error: {data.get('message', 'Unknown error')}"
-                logging.error(error_msg)
-                return {'lat': None, 'lon': None, 'error': error_msg}
-        else:
+        if response.status_code != 200:
+            # Transient (e.g. 429 "too many queries today", 5xx): do not cache.
             conn.close()
             error_msg = f"WiGLE HTTP {response.status_code}: {response.text}"
             logging.error(error_msg)
             return {'lat': None, 'lon': None, 'error': error_msg}
+
+        data = response.json()
+        if not data.get('success'):
+            # API-level failure (auth / rate-limit message / ...): do not cache.
+            conn.close()
+            error_msg = f"WiGLE API error: {data.get('message', 'Unknown error')}"
+            logging.error(error_msg)
+            return {'lat': None, 'lon': None, 'error': error_msg}
+
+        now = datetime.datetime.now().isoformat()
+        results_list = data.get('results') or []
+        result = results_list[0] if data.get('resultCount', 0) > 0 and results_list else None
+        lat = result.get('trilat') if result else None
+        lon = result.get('trilong') if result else None
+        if lat is not None and lon is not None:
+            cursor.execute(
+                'INSERT OR REPLACE INTO ap_locations (bssid, lat, lon, lastupdt) VALUES (?, ?, ?, ?)',
+                (bssid, lat, lon, now))
+            conn.commit()
+            conn.close()
+            return {'lat': lat, 'lon': lon, 'error': None}
+
+        # WiGLE succeeded but has no location for this BSSID: cache the negative
+        # result so we stop re-querying it (the cause of quota exhaustion).
+        cursor.execute(
+            'INSERT OR REPLACE INTO ap_locations (bssid, lat, lon, lastupdt) VALUES (?, NULL, NULL, ?)',
+            (bssid, now))
+        conn.commit()
+        conn.close()
+        logging.info(f"WiGLE has no location for BSSID {bssid}; cached as not-found")
+        return {'lat': None, 'lon': None, 'error': None}
     except requests.RequestException as e:
         conn.close()
         error_msg = f"WiGLE request failed: {str(e)}"
@@ -140,7 +185,8 @@ def track_device():
     sta_snr = request.args.get('sta_snr', type=int)
     cat_snr = request.args.get('cat_snr', type=int)
     print(f"Track: scan_id={scan_id}, sta_rssi={sta_rssi}, cat_rssi={cat_rssi}, \
-          sta_snr={sta_snr}, cat_snr={cat_snr}, bssid[0]={bssids[0]}, rssi[0]={rssis[0]}")
+          sta_snr={sta_snr}, cat_snr={cat_snr}, "
+          f"bssid[0]={bssids[0] if bssids else None}, rssi[0]={rssis[0] if rssis else None}")
 
     aps = []
     for bssid, rssi in zip(bssids, rssis):
