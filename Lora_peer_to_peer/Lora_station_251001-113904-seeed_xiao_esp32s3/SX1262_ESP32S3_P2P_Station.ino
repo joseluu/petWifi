@@ -13,7 +13,8 @@
 // 2025/04/04
 #include <WiFi.h>
 #include <HTTPClient.h>         // << added: HTTP client for upload
-#include <RadioLib.h>           // RadioLib by Jan Gromes 7.1.2  
+#include <time.h>               // for NTP time sync and timestamping
+#include <RadioLib.h>           // RadioLib by Jan Gromes 7.1.2
 #include <U8g2lib.h>            // U8g2 2.35.30
 #include <SPI.h>
 #include <SD.h>
@@ -25,6 +26,12 @@
 #include "network_creds.h"      // WiFi SSID and Password
 
 #define RX_POLL_TIMEOUT 120000 // re-arm receiver if nothing heard for this long [mS]
+
+// ***** NTP / clock configuration *****
+#define NTP_SERVER_1   "pool.ntp.org"
+#define NTP_SERVER_2   "time.nist.gov"
+#define GMT_OFFSET_SEC      0   // UTC; change for your timezone (e.g. 3600 for CET)
+#define DAYLIGHT_OFFSET_SEC 0   // daylight saving offset [s]
 
 #define RF_SW          D5       // RF Switch
 #define sd_sck         D8       // Arduino SPI library uses VSPI circuit
@@ -113,6 +120,18 @@ void errorBlink_1(uint8_t err)
   }
   delay(500);
 }
+// Fill buffer with current local time as "YYYY-MM-DD HH:MM:SS".
+// Falls back to an uptime marker if NTP has not synced yet.
+char * formatTimestamp(char *buffer, size_t bufferSize) {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 0)) {           // 0 ms wait: use whatever the clock has
+    strftime(buffer, bufferSize, "%Y-%m-%d %H:%M:%S", &timeinfo);
+  } else {
+    snprintf(buffer, bufferSize, "no-ntp (uptime %lus)", millis() / 1000);
+  }
+  return buffer;
+}
+
 // Print contents of a received CatPacket to Serial
 void printCatPacket(const CatPacket &packet) {
   Serial.printf("received UID:\t%08X\n", packet.fields.UID);
@@ -215,6 +234,20 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   snprintf(uploadURL, sizeof(uploadURL), "http://%s/api/track", uploadHost);
+
+  // Initialize internal clock from NTP. SNTP runs in the background and will
+  // sync once WiFi associates; wait briefly here so the first packets are stamped.
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+  {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 8000)) {       // wait up to 8 s for first NTP sync
+      char ts[32];
+      strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &timeinfo);
+      Serial.print("NTP time synced: "); Serial.println(ts);
+    } else {
+      Serial.println("NTP not synced yet (will keep trying in background)");
+    }
+  }
   // Station UID
   Serial.print("Station UID "); Serial.println(STATION_UID, HEX);
 
@@ -340,6 +373,10 @@ void loop()
   senderuid = catPacket.fields.UID;
 
   if (state == RADIOLIB_ERR_NONE && senderuid == CAT_UID) {
+    char rxTimestamp[40];
+    formatTimestamp(rxTimestamp, sizeof(rxTimestamp));
+    Serial.print("Packet received at: "); Serial.println(rxTimestamp);
+
     rxdata = "";
     for(int i = 0; i < sizeof(catPacket.bytes); i++) {
       sprintf(printBuff, "%02x", catPacket.bytes[i]);
