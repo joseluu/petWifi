@@ -8,7 +8,7 @@
 // Transmit-only protocol (no station handshake):
 // 1. scan Wi-Fi passive on 2.4 GHz channels
 // 2. transmit CatPacket (UID, packetNumber, Vbatt, rssi, snr, interval, apCount, apList[5])
-// 3. sleep until next CAT_TX_INTERVAL (60 s)
+// 3. sleep until next CAT_TX_INTERVAL (15 min)
 
 // 2025/04/04
 
@@ -21,7 +21,7 @@
 #include "esp32-hal-cpu.h"
 #include "esp_bt.h"
 
-#define CAT_FW_VERSION "v1.0.3"
+#define CAT_FW_VERSION "v1.0.4"
 
 #ifndef ESP_IDF_VERSION_VAL
 #define ESP_IDF_VERSION_VAL(major, minor, patch)  ((major)*1000 + (minor)*100 + (patch))
@@ -44,7 +44,7 @@ wifi_ap_record_t ap_records[MAX_AP_RECORDS];
 #include "../Lora_station_251001-113904-seeed_xiao_esp32s3/include/packet.h"
 
 #define CHECK_INTERVAL     10000   // legacy communication check interval [mS] (unused in transmit-only mode)
-#define CAT_TX_INTERVAL    60000   // cat transmits every 60 s
+#define CAT_TX_INTERVAL    900000  // cat scans + transmits every 15 min (900 s)
 #define TX_TIMEOUT         15000   // upper bound on CatPacket airtime at SF12/BW62.5/CR4/8 (~10 s)
 #define RF_SW           D5      // RF Switch
 
@@ -326,7 +326,11 @@ void loop()
   catPacket.fields.vbatt = Vbatt;
   catPacket.fields.rssi = 0;                          // no incoming packet to measure
   catPacket.fields.snr = 0;
-  catPacket.fields.interval = CAT_TX_INTERVAL / 1000; // seconds
+  // interval is a uint8_t (max 255 s) in the wire format; report the cadence in
+  // seconds but clamp so a >255 s interval (e.g. 900 s) doesn't wrap to a
+  // misleading value. Diagnostic only -- the station prints it but doesn't use it.
+  uint32_t intervalSec = CAT_TX_INTERVAL / 1000;
+  catPacket.fields.interval = (intervalSec > 255) ? 255 : intervalSec;
   catPacket.fields.apCount = std::min((int)ap_count, MAX_APS_IN_PACKET);
   for (uint8_t i = 0; i < ap_count && i < MAX_APS_IN_PACKET; i++) {
     catPacket.fields.apList[i] = AccessPoint(ap_records[i].bssid, ap_records[i].rssi, ap_records[i].primary);
