@@ -5,6 +5,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 from flask import Flask, request, render_template, jsonify
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 import os
 import logging
 
@@ -17,6 +18,10 @@ app = Flask(__name__)
 WIGLE_USER = os.getenv('WIGLE_USER')
 WIGLE_TOKEN = os.getenv('WIGLE_TOKEN')
 WIGLE_API_URL = 'https://api.wigle.net/api/v2/network/search'
+
+# WiGLE resets each account's daily query allowance at 00:00 US/Pacific, so the
+# call counter is bucketed by Pacific calendar day to line up with that reset.
+PACIFIC = ZoneInfo('America/Los_Angeles')
 
 # Load center points from .env
 map_center_str = os.getenv('MAP_CENTER')
@@ -72,6 +77,12 @@ def init_db():
             sta_snr INTEGER
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS wigle_usage (
+            day TEXT PRIMARY KEY,
+            count INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -92,6 +103,26 @@ def _negative_cache_valid(lastupdt):
     except (ValueError, TypeError):
         return False
     return datetime.datetime.now() - ts < NEGATIVE_TTL
+
+
+def _record_wigle_call():
+    """Increment the WiGLE call counter for the current US/Pacific day.
+
+    Counts every actual outbound WiGLE request (cache hits do not call this), so
+    it tracks consumption against WiGLE's daily quota. Uses its own short-lived
+    connection so the count is committed regardless of how get_ap_location's
+    main transaction ends.
+    """
+    day = datetime.datetime.now(PACIFIC).date().isoformat()
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        conn.execute(
+            'INSERT INTO wigle_usage (day, count) VALUES (?, 1) '
+            'ON CONFLICT(day) DO UPDATE SET count = count + 1',
+            (day,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_ap_location(bssid):
@@ -127,6 +158,7 @@ def get_ap_location(bssid):
     }
     headers = {'Accept': 'application/json'}
     logging.info(f"WiGLE API request for BSSID {bssid}: {params}")
+    _record_wigle_call()
     try:
         response = requests.get(WIGLE_API_URL, params=params, auth=HTTPBasicAuth(WIGLE_USER, WIGLE_TOKEN), headers=headers)
         logging.info(f"WiGLE API response status for BSSID {bssid}: {response.status_code}")
@@ -205,6 +237,27 @@ def track_device():
     aps_with_loc = []
     errors = []
     return process_aps(scan_id, aps, aps_with_loc, common_data, errors)
+
+
+@app.route('/api/wigle_usage', methods=['GET'])
+def wigle_usage():
+    """Report how many WiGLE queries were made, bucketed by US/Pacific day.
+
+    WiGLE exposes no remaining-quota endpoint, so this is our own count of
+    outbound calls. 'today' is the count since the last 00:00 Pacific reset.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT day, count FROM wigle_usage ORDER BY day DESC LIMIT 30')
+    rows = cursor.fetchall()
+    conn.close()
+    today = datetime.datetime.now(PACIFIC).date().isoformat()
+    today_count = next((c for d, c in rows if d == today), 0)
+    return jsonify({
+        'pacific_day': today,
+        'today': today_count,
+        'history': [{'day': d, 'count': c} for d, c in rows]
+    }), 200
 
 
 @app.route('/api/scan', methods=['POST'])
